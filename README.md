@@ -24,21 +24,21 @@ La URL recomendada para usuarios finales es CloudFront, porque entrega el sitio 
 
 ```mermaid
 flowchart LR
-  U["Usuario web / movil<br/>Navegador"] --> CF["Amazon CloudFront<br/>HTTPS + CDN"]
-  CF --> S3["Amazon S3<br/>Frontend estatico<br/>HTML/CSS/JS"]
+  U["Usuario web / móvil<br/>Navegador"] --> CF["Amazon CloudFront<br/>HTTPS + CDN"]
+  CF --> S3["Amazon S3<br/>Frontend estático<br/>HTML/CSS/JS"]
   S3 --> CF
 
   U --> APIGW["Amazon API Gateway<br/>HTTP API"]
   APIGW --> L["AWS Lambda<br/>Backend Node.js"]
 
   L --> DB["Supabase PostgreSQL<br/>Usuarios<br/>Inventario<br/>Paquetes<br/>Checklist"]
-  L --> CW["Amazon CloudWatch<br/>Logs y metricas"]
+  L --> CW["Amazon CloudWatch<br/>Logs y métricas"]
 
-  IAM["IAM Role<br/>Permisos de ejecucion"] --> L
+  IAM["IAM Role<br/>Permisos de ejecución"] --> L
 
   subgraph IaaS["Componente IaaS de evidencia"]
     VPC["Amazon VPC<br/>Red virtual"]
-    SUB["Subred publica"]
+    SUB["Subred pública"]
     EC2["Amazon EC2<br/>Instancia de prueba"]
     IGW["Internet Gateway"]
     SG["Security Group<br/>SSH + HTTP"]
@@ -48,6 +48,14 @@ flowchart LR
     SUB --> IGW
     SG --> EC2
   end
+
+  classDef aws fill:#111827,stroke:#f59e0b,color:#ffffff;
+  classDef db fill:#111827,stroke:#3b82f6,color:#ffffff;
+  classDef user fill:#111827,stroke:#662d91,color:#ffffff;
+
+  class CF,S3,APIGW,L,CW,IAM,EC2,VPC,SUB,IGW,SG aws;
+  class DB db;
+  class U user;
 ```
 
 ## Servicios Usados
