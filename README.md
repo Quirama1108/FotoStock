@@ -1,61 +1,77 @@
-# FotoStock - Inventario de material fotografico
+# FotoStock
 
-Aplicacion web para administrar inventario fotografico, preparar paquetes de material para producciones y validar checklist de salida/regreso.
+FotoStock es una aplicacion web para administrar inventario de material fotografico, preparar paquetes para producciones y validar checklist de salida/regreso. El proyecto fue desarrollado como entrega de Cloud Computing y despliega una solucion funcional combinando frontend estatico, backend serverless, persistencia, redes, seguridad, observabilidad y estimacion de costos.
 
-## Que incluye ahora
+## Demo
 
-- Frontend estatico listo para S3.
-- Login con cedula y contrasena.
-- Creacion de cuenta guardada en Supabase.
-- JWT real emitido por el backend.
-- Backend serverless compatible con AWS Lambda + API Gateway.
-- CRUD de inventario contra Supabase.
+- Aplicacion HTTPS: `https://dyba4pp9u9eet.cloudfront.net`
+- Frontend S3 directo: `http://fotostock-frontend-954377119221.s3-website-us-east-1.amazonaws.com`
+
+La URL recomendada para usuarios finales es CloudFront, porque entrega el sitio por HTTPS.
+
+## Funcionalidades
+
+- Registro e inicio de sesion con cedula y contrasena.
+- Autenticacion con JWT emitido por el backend.
+- Inventario privado por usuario.
+- Creacion, edicion y eliminacion de material fotografico.
+- Categorias: camaras, lentes, flashes, tripodes, filtros, triggers, memorias y gadgets.
 - Paquetes de produccion con seleccion de material.
 - Checklist independiente para salida y regreso.
-- SQL de base de datos en `database/schema.sql`.
+- Interfaz oscura responsive para escritorio y mobile.
 
-## URL desplegada
-
-- Frontend S3: `http://fotostock-frontend-954377119221.s3-website-us-east-1.amazonaws.com`
-- Frontend CloudFront HTTPS: `https://dyba4pp9u9eet.cloudfront.net`
-- API Gateway: `https://dq70ye7x25.execute-api.us-east-1.amazonaws.com`
-
-## Arquitectura del proyecto
+## Arquitectura
 
 ```mermaid
 flowchart LR
-  U[Usuario] --> CF[CloudFront HTTPS]
-  CF --> S3[S3 frontend estatico]
-  S3 --> API[API Gateway HTTP API]
-  API --> L[Lambda backend Node.js]
-  L --> DB[(Supabase Postgres)]
-  L --> CW[CloudWatch logs]
-  EC2[EC2 de evidencia/pruebas] --> VPC[VPC + subred publica]
+  U["Usuario web / movil<br/>Navegador"] --> CF["Amazon CloudFront<br/>HTTPS + CDN"]
+  CF --> S3["Amazon S3<br/>Frontend estatico<br/>HTML/CSS/JS"]
+  S3 --> CF
+
+  U --> APIGW["Amazon API Gateway<br/>HTTP API"]
+  APIGW --> L["AWS Lambda<br/>Backend Node.js"]
+
+  L --> DB["Supabase PostgreSQL<br/>Usuarios<br/>Inventario<br/>Paquetes<br/>Checklist"]
+  L --> CW["Amazon CloudWatch<br/>Logs y metricas"]
+
+  IAM["IAM Role<br/>Permisos de ejecucion"] --> L
+
+  subgraph IaaS["Componente IaaS de evidencia"]
+    VPC["Amazon VPC<br/>Red virtual"]
+    SUB["Subred publica"]
+    EC2["Amazon EC2<br/>Instancia de prueba"]
+    IGW["Internet Gateway"]
+    SG["Security Group<br/>SSH + HTTP"]
+
+    VPC --> SUB
+    SUB --> EC2
+    SUB --> IGW
+    SG --> EC2
+  end
 ```
 
-## Que significa cada servicio
+## Servicios Usados
 
-- **S3**: aloja `index.html`, `styles.css`, `app.js` y `config.js`.
-- **CloudFront**: entrega el frontend por HTTPS y cache en edge locations.
-- **Lambda**: es el backend real. Valida login, crea cuentas, genera JWT y guarda/lee datos.
-- **Supabase**: base de datos Postgres donde viven usuarios, inventario, paquetes y checks.
-- **API Gateway**: publica la Lambda como API HTTP para que el frontend pueda consumirla.
-- **EC2/VPC**: cumple la parte IaaS del proyecto. Puede ser una instancia pequena para pruebas, evidencia de red y captura de configuracion; no tiene que alojar la app si usamos S3 + Lambda.
-- **CloudWatch**: guarda logs y metricas de Lambda/API.
+- **Amazon S3**: hospeda los archivos estaticos del frontend.
+- **Amazon CloudFront**: distribuye el frontend por HTTPS y cache en edge locations.
+- **Amazon API Gateway**: expone la API HTTP consumida por el navegador.
+- **AWS Lambda**: ejecuta el backend serverless en Node.js.
+- **Supabase PostgreSQL**: persiste usuarios, inventario, paquetes y checklist.
+- **Amazon CloudWatch**: registra logs y metricas basicas de Lambda.
+- **Amazon EC2, VPC, Subnet, Internet Gateway y Security Group**: evidencian el componente IaaS, redes y seguridad basica.
+- **IAM Role**: otorga permisos de ejecucion a Lambda siguiendo el principio de menor privilegio para logs.
 
-## Infraestructura creada
+## Flujo de Datos
 
-- VPC: `vpc-09d00532d350c3d62`
-- Subred publica: `subnet-0f8dea12c6a583220`
-- Internet Gateway: `igw-0511d5af8677e5187`
-- Route table publica: `rtb-0c31c6e73388d2539`
-- Security Group EC2: `sg-026171a5548ca7acb`
-- EC2: `i-02be7044d66d81254`
-- CloudFront: `E1KBW0LU5KVXYW`
-- Lambda: `arn:aws:lambda:us-east-1:954377119221:function:fotostock-api`
-- CloudWatch log group: `/aws/lambda/fotostock-api`
+1. El usuario accede a la aplicacion mediante CloudFront.
+2. CloudFront entrega los archivos estaticos almacenados en S3.
+3. El navegador consume la API publicada en API Gateway.
+4. API Gateway invoca la funcion Lambda.
+5. Lambda valida el JWT, procesa la solicitud y consulta Supabase.
+6. Supabase devuelve los datos persistidos.
+7. Lambda responde al frontend y registra eventos en CloudWatch.
 
-## Estructura
+## Estructura Del Proyecto
 
 ```text
 .
@@ -63,6 +79,7 @@ flowchart LR
 |-- styles.css
 |-- app.js
 |-- config.js
+|-- cloudfront-distribution.json
 |-- backend/
 |   |-- lambda.mjs
 |   |-- local-server.mjs
@@ -74,7 +91,7 @@ flowchart LR
     `-- migrations/
 ```
 
-## Configuracion local
+## Configuracion Local
 
 1. Crea un proyecto en Supabase.
 2. En Supabase SQL Editor ejecuta `database/schema.sql`.
@@ -88,7 +105,7 @@ CORS_ORIGIN=*
 PORT=8787
 ```
 
-En `SUPABASE_SERVICE_ROLE_KEY` debes poner una key privada de servidor: `service_role` o `secret`. No uses `anon` ni `publishable`, porque esas claves respetan RLS y no pueden insertar en `inventory_items` desde este backend.
+En `SUPABASE_SERVICE_ROLE_KEY` debes usar una key privada de servidor: `service_role` o `secret`. No uses `anon` ni `publishable`, porque esas claves no deben operar como backend.
 
 4. Arranca la API local:
 
@@ -97,30 +114,59 @@ cd backend
 node local-server.mjs
 ```
 
-Deja esa terminal abierta mientras pruebas la aplicacion. Si la cierras, el frontend mostrara un error de conexion.
+5. Para pruebas locales, cambia temporalmente `config.js` a:
 
-5. Para pruebas locales, cambia temporalmente `config.js` a `http://localhost:8787` y abre `index.html`.
+```js
+window.FOTOSTOCK_CONFIG = {
+  API_BASE_URL: "http://localhost:8787",
+};
+```
+
+6. Abre `index.html` en el navegador.
 
 ## Despliegue
 
-1. Subir el frontend a S3 como static website.
-2. Desplegar `backend/lambda.mjs` con `backend/deploy-lambda.ps1`.
-3. Mantener `config.js` apuntando a la URL de API Gateway.
-4. Crear VPC, subred publica y EC2 pequena para cumplir el modulo IaaS.
-5. Activar CloudWatch logs, revisar metricas y tomar capturas para el documento tecnico.
+- El frontend se sube a S3 y se distribuye por CloudFront.
+- El backend se despliega como Lambda con `backend/deploy-lambda.ps1`.
+- API Gateway expone la funcion Lambda como API HTTP.
+- Supabase se configura ejecutando el SQL de `database/schema.sql` y las migraciones.
+- EC2/VPC/Subred publica/IGW/Route Table/Security Group se crean como evidencia IaaS.
 
-## Nota de seguridad
+## Seguridad
 
-La `SUPABASE_SERVICE_ROLE_KEY` solo debe vivir en Lambda o en tu entorno local de backend. Nunca debe ponerse en `config.js`, HTML ni frontend.
+- La clave privada de Supabase solo vive en Lambda o en `backend/.env.local`.
+- El frontend nunca contiene `SUPABASE_SERVICE_ROLE_KEY`.
+- Los usuarios se autentican con cedula y contrasena.
+- El backend emite JWT y valida cada solicitud protegida.
+- El inventario y los paquetes se filtran por usuario autenticado.
+- Los archivos sensibles estan excluidos con `.gitignore`.
 
-## Licencia
+## Observabilidad Y Costos
 
-Este proyecto se publica para revision academica y desarrollo personal. Todos los derechos estan reservados; no se concede permiso para copiar, redistribuir o reutilizar el codigo sin autorizacion.
+- CloudWatch registra invocaciones, errores controlados y metricas basicas de Lambda.
+- La estimacion en AWS Pricing Calculator dio un costo aproximado de `0.20 USD/mes`, usando bajo trafico academico y EC2 solo como evidencia/pruebas.
 
-## Archivos que no se suben
+## Evidencias Recomendadas Para La Entrega
+
+- S3 con archivos del frontend.
+- CloudFront con estado desplegado.
+- API Gateway conectado a Lambda.
+- Lambda y variables de entorno configuradas.
+- CloudWatch Logs con requests.
+- Supabase con tablas y datos.
+- EC2 en VPC personalizada.
+- Subred publica, Internet Gateway, Route Table y Security Group.
+- AWS Pricing Calculator.
+- App funcionando: login, inventario, paquetes y checklist.
+
+## Archivos Que No Se Suben
 
 - `backend/.env.local`: contiene secretos.
 - `*.pem`: llaves privadas de EC2.
 - `*.zip`: paquetes generados para Lambda.
 - `*.log`: logs locales.
 - `lambda-trust-policy.json` y `s3-policy.json`: archivos temporales generados durante despliegue.
+
+## Licencia
+
+Este proyecto se publica para revision academica y desarrollo personal. Todos los derechos estan reservados; no se concede permiso para copiar, redistribuir o reutilizar el codigo sin autorizacion.
