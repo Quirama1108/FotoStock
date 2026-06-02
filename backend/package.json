@@ -1,0 +1,13 @@
+{
+  "name": "fotostock-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node local-server.mjs",
+    "check": "node --check lambda.mjs && node --check local-server.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

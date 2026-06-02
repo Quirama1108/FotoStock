@@ -1,0 +1,11 @@
+.env
+.env.local
+backend/.env
+backend/.env.local
+*.pem
+*.zip
+*.log
+backend/lambda-trust-policy.json
+s3-policy.json
+node_modules/
+.serverless/
