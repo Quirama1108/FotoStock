@@ -11,7 +11,7 @@ La URL recomendada para usuarios finales es CloudFront, porque entrega el sitio 
 
 ## Funcionalidades
 
-- Registro e inicio de sesion con cedula y contrasena.
+- Registro e inicio de sesion con cedula y contraseña.
 - Autenticacion con JWT emitido por el backend.
 - Inventario privado por usuario.
 - Creacion, edicion y eliminacion de material fotografico.
@@ -103,7 +103,7 @@ flowchart LR
 
 1. Crea un proyecto en Supabase.
 2. En Supabase SQL Editor ejecuta `database/schema.sql`.
-3. Crea `backend/.env.local` con estas variables. Este archivo es secreto y no se sube a GitHub:
+3. Crea `backend/.env.local` con estas variables.
 
 ```env
 SUPABASE_URL=https://TU-PROYECTO.supabase.co
@@ -113,7 +113,6 @@ CORS_ORIGIN=*
 PORT=8787
 ```
 
-En `SUPABASE_SERVICE_ROLE_KEY` debes usar una key privada de servidor: `service_role` o `secret`. No uses `anon` ni `publishable`, porque esas claves no deben operar como backend.
 
 4. Arranca la API local:
 
@@ -154,26 +153,6 @@ window.FOTOSTOCK_CONFIG = {
 - CloudWatch registra invocaciones, errores controlados y metricas basicas de Lambda.
 - La estimacion en AWS Pricing Calculator dio un costo aproximado de `0.20 USD/mes`, usando bajo trafico academico y EC2 solo como evidencia/pruebas.
 
-## Evidencias Recomendadas Para La Entrega
-
-- S3 con archivos del frontend.
-- CloudFront con estado desplegado.
-- API Gateway conectado a Lambda.
-- Lambda y variables de entorno configuradas.
-- CloudWatch Logs con requests.
-- Supabase con tablas y datos.
-- EC2 en VPC personalizada.
-- Subred publica, Internet Gateway, Route Table y Security Group.
-- AWS Pricing Calculator.
-- App funcionando: login, inventario, paquetes y checklist.
-
-## Archivos Que No Se Suben
-
-- `backend/.env.local`: contiene secretos.
-- `*.pem`: llaves privadas de EC2.
-- `*.zip`: paquetes generados para Lambda.
-- `*.log`: logs locales.
-- `lambda-trust-policy.json` y `s3-policy.json`: archivos temporales generados durante despliegue.
 
 ## Licencia
 
