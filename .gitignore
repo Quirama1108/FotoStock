@@ -5,6 +5,8 @@ backend/.env.local
 *.pem
 *.zip
 *.log
+*.docx
+evidencias/
 backend/lambda-trust-policy.json
 s3-policy.json
 node_modules/

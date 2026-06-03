@@ -6,6 +6,7 @@ FotoStock es una aplicacion web para administrar inventario de material fotograf
 
 - Aplicacion HTTPS: `https://dyba4pp9u9eet.cloudfront.net`
 - Frontend S3 directo: `http://fotostock-frontend-954377119221.s3-website-us-east-1.amazonaws.com`
+- Video final: `https://youtu.be/OBY2k0iIS-A`
 
 La URL recomendada para usuarios finales es CloudFront, porque entrega el sitio por HTTPS.
 
