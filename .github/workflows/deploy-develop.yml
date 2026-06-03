@@ -1,0 +1,126 @@
+name: Deploy Develop
+
+on:
+  push:
+    branches:
+      - develop
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-east-1
+  LAMBDA_FUNCTION_NAME: fotostock-api
+  S3_BUCKET: fotostock-frontend-954377119221
+  CLOUDFRONT_DISTRIBUTION_ID: E1KBW0LU5KVXYW
+
+jobs:
+  deploy:
+    name: Deploy frontend and backend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Validate backend syntax
+        run: npm --prefix backend run check
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Package Lambda
+        run: |
+          cd backend
+          zip -q ../fotostock-lambda.zip lambda.mjs
+
+      - name: Update Lambda code
+        run: |
+          aws lambda update-function-code \
+            --function-name "$LAMBDA_FUNCTION_NAME" \
+            --zip-file fileb://fotostock-lambda.zip \
+            --region "$AWS_REGION"
+
+          aws lambda wait function-updated \
+            --function-name "$LAMBDA_FUNCTION_NAME" \
+            --region "$AWS_REGION"
+
+      - name: Update Lambda configuration
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          CORS_ORIGIN: ${{ secrets.CORS_ORIGIN }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+
+          required = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "JWT_SECRET"]
+          missing = [key for key in required if not os.environ.get(key)]
+          if missing:
+              raise SystemExit(f"Missing GitHub secrets: {', '.join(missing)}")
+
+          payload = {
+              "Variables": {
+                  "SUPABASE_URL": os.environ["SUPABASE_URL"],
+                  "SUPABASE_SERVICE_ROLE_KEY": os.environ["SUPABASE_SERVICE_ROLE_KEY"],
+                  "JWT_SECRET": os.environ["JWT_SECRET"],
+                  "CORS_ORIGIN": os.environ.get("CORS_ORIGIN") or "*",
+              }
+          }
+
+          with open("lambda-env.json", "w", encoding="utf-8") as fh:
+              json.dump(payload, fh)
+          PY
+
+          aws lambda update-function-configuration \
+            --function-name "$LAMBDA_FUNCTION_NAME" \
+            --runtime nodejs20.x \
+            --handler lambda.handler \
+            --environment file://lambda-env.json \
+            --timeout 15 \
+            --memory-size 256 \
+            --region "$AWS_REGION"
+
+          aws lambda wait function-updated \
+            --function-name "$LAMBDA_FUNCTION_NAME" \
+            --region "$AWS_REGION"
+
+      - name: Upload frontend to S3
+        run: |
+          aws s3 cp index.html "s3://$S3_BUCKET/index.html" \
+            --content-type "text/html; charset=utf-8" \
+            --cache-control "no-cache" \
+            --region "$AWS_REGION"
+
+          aws s3 cp styles.css "s3://$S3_BUCKET/styles.css" \
+            --content-type "text/css; charset=utf-8" \
+            --cache-control "no-cache" \
+            --region "$AWS_REGION"
+
+          aws s3 cp app.js "s3://$S3_BUCKET/app.js" \
+            --content-type "application/javascript; charset=utf-8" \
+            --cache-control "no-cache" \
+            --region "$AWS_REGION"
+
+          aws s3 cp config.js "s3://$S3_BUCKET/config.js" \
+            --content-type "application/javascript; charset=utf-8" \
+            --cache-control "no-cache" \
+            --region "$AWS_REGION"
+
+      - name: Invalidate CloudFront cache
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
+            --paths "/*"

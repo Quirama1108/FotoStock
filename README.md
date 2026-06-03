@@ -139,6 +139,7 @@ window.FOTOSTOCK_CONFIG = {
 - API Gateway expone la funcion Lambda como API HTTP.
 - Supabase se configura ejecutando el SQL de `database/schema.sql` y las migraciones.
 - EC2/VPC/Subred publica/IGW/Route Table/Security Group se crean como evidencia IaaS.
+- GitHub Actions puede desplegar automaticamente desde la rama `develop`; ver `docs/github-actions-deploy.md`.
 
 ## Seguridad
 
