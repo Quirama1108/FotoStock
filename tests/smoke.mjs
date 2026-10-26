@@ -1,5 +1,5 @@
 // End-to-end smoke test in headless Chrome with a phone viewport. Run: npm test
-// Set SHOTS=<folder> to also save a screenshot of each screen.
+// Set SHOTS=<folder> to also save a screenshot of each screen; DESKTOP=1 for a PC-sized window.
 import assert from "node:assert/strict";
 import { writeFile, readFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -10,10 +10,11 @@ import { startServer } from "./server.mjs";
 const server = await startServer();
 const url = `http://localhost:${server.address().port}/`;
 const browser = await chromium.launch({ channel: "chrome" });
+const desktop = Boolean(process.env.DESKTOP);
 const context = await browser.newContext({
-  viewport: { width: 390, height: 844 },
-  isMobile: true,
-  hasTouch: true,
+  viewport: desktop ? { width: 1366, height: 800 } : { width: 390, height: 844 },
+  isMobile: !desktop,
+  hasTouch: !desktop,
   acceptDownloads: true,
 });
 const page = await context.newPage();
@@ -24,7 +25,11 @@ page.on("console", (msg) => msg.type() === "error" && errors.push(msg.text()));
 
 // Each confirm() takes the next answer from this queue (default: accept).
 const answers = [];
-page.on("dialog", (dialog) => (answers.length ? answers.shift() : true) ? dialog.accept() : dialog.dismiss());
+// true/false = accept/dismiss; a string answers a prompt().
+page.on("dialog", (dialog) => {
+  const answer = answers.length ? answers.shift() : true;
+  return answer === false ? dialog.dismiss() : dialog.accept(typeof answer === "string" ? answer : undefined);
+});
 
 const shotsDir = process.env.SHOTS;
 if (shotsDir) await mkdir(shotsDir, { recursive: true });
@@ -84,8 +89,57 @@ try {
     await expectToast(/Lente 50mm" guardado/);
     assert.equal(await page.locator("[data-item-form] [name=name]").inputValue(), "");
     assert.equal(await page.locator("[data-item-form] [name=category]").inputValue(), "lentes");
-    await addItem({ name: "Flash Godox", category: "flashes" });
+    await addItem({ name: "Flash Godox", category: "flashes", quantity: "3", description: "Godox V1 Sony" });
     await expectToast(/Flash Godox" guardado/);
+    await page.locator(".item-title strong", { hasText: "×3" }).waitFor();
+  });
+
+  await step("crea y renombra una categoría propia", async () => {
+    await nav("Inventario");
+    answers.push(`<img src=x onerror="window.__xss=1">Drones`);
+    await page.locator("[data-add-category]").click();
+    await expectToast(/creada/);
+    answers.push("Drones");
+    await page.locator("[data-rename-category]").click();
+    await expectToast(/renombrada/);
+    answers.push("lentes");
+    await page.locator("[data-add-category]").click();
+    await expectToast(/Ya existe/);
+    await expectCount(page.locator(".chip.is-active", { hasText: /^Drones$/ }), 1);
+    assert.equal(await page.evaluate(() => window.__xss), undefined);
+    await page.locator("[data-delete-category]").click();
+    await expectToast(/borrada/);
+    await expectCount(page.locator(".chip", { hasText: "Drones" }), 0);
+    await nav("Panel");
+  });
+
+  await step("borrar una categoría base deja sus equipos en 'Sin categoría' (no elegible)", async () => {
+    await nav("Inventario");
+    await expectCount(page.locator("[data-category=sin-categoria]"), 0);
+    await page.locator("[data-category=lentes]").click();
+    await page.locator("[data-delete-category]").click();
+    await expectToast(/borrada/);
+    await expectCount(page.locator("[data-category=lentes]"), 0);
+    await page.locator(".item-row", { hasText: "Lente 50mm" }).getByText("Sin categoría").waitFor();
+    await page.locator(".item-row", { hasText: "Lente 50mm" }).getByRole("button", { name: /Editar/ }).click();
+    const select = page.locator("[data-item-form] [name=category]");
+    assert.equal(await select.locator("option:checked").textContent(), "Sin categoría");
+    assert.ok(await select.locator("option", { hasText: "Sin categoría" }).isDisabled());
+    await page.getByRole("button", { name: "Guardar cambios" }).click();
+    await expectToast(/actualizado/);
+    await page.locator(".item-row", { hasText: "Lente 50mm" }).getByText("Sin categoría").waitFor();
+    await page.locator("[data-category=sin-categoria]").waitFor();
+    await nav("Panel");
+  });
+
+  await step("mantener presionado un equipo muestra sus detalles", async () => {
+    await nav("Inventario");
+    await page.locator(".item-row", { hasText: "Flash Godox" }).locator(".item-title").hover();
+    await page.mouse.down();
+    await page.locator(".peek:not([hidden])", { hasText: "Godox V1 Sony" }).waitFor();
+    await page.mouse.up();
+    await expectCount(page.locator(".peek:not([hidden])"), 0);
+    await nav("Panel");
   });
 
   await step("rechaza serial duplicado (sin importar mayúsculas)", async () => {
@@ -132,10 +186,12 @@ try {
     await page.locator("[data-pick-search]").fill("lente");
     await expectCount(page.locator(".selectable:not([hidden])"), 1);
     await page.locator("[data-pick-search]").fill("");
-    await page.locator(".selectable", { hasText: "Lente 50mm" }).locator("input").check();
-    await page.locator(".selectable", { hasText: "Flash Godox" }).locator("input").check();
+    await page.locator(".selectable", { hasText: "Lente 50mm" }).locator("input[type=checkbox]").check();
+    await page.locator(".selectable", { hasText: "Flash Godox" }).locator("input[type=checkbox]").check();
+    await page.locator(".selectable", { hasText: "Flash Godox" }).locator("input[type=number]").fill("2");
     await shot("04-elegir-material");
     await page.getByRole("button", { name: "Guardar material" }).click();
+    await page.locator(".check-row", { hasText: "Flash Godox ×2" }).waitFor();
 
     await page.locator(".check-row", { hasText: "Lente 50mm" }).click();
     await page.locator(".check-row", { hasText: "Flash Godox" }).click();

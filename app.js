@@ -3,7 +3,9 @@ const STORE = "kv";
 const DATA_KEY = "data";
 const BACKUP_REMINDER_DAYS = 7;
 
-const categories = [
+// Base categories ship with the app; users add their own (state.categories) and can
+// delete any (base ones are hidden via state.hiddenCategories).
+const baseCategories = [
   { id: "camaras", label: "Cámaras" },
   { id: "lentes", label: "Lentes" },
   { id: "flashes", label: "Flashes" },
@@ -11,8 +13,16 @@ const categories = [
   { id: "filtros", label: "Filtros" },
   { id: "triggers", label: "Triggers" },
   { id: "memorias", label: "Memorias" },
+  { id: "luces", label: "Luces continuas" },
+  { id: "modificadores", label: "Modificadores" },
+  { id: "microfonos", label: "Micrófonos" },
+  { id: "estabilizadores", label: "Estabilizadores" },
+  { id: "baterias", label: "Baterías" },
   { id: "gadgets", label: "Gadgets" },
 ];
+
+// Where items land when their category is deleted. Never offered in the form.
+const UNCATEGORIZED = { id: "sin-categoria", label: "Sin categoría" };
 
 // Only these are stored; "paquete" and "prestado" are derived (see displayStatus).
 const manualStatuses = ["disponible", "mantenimiento", "perdido"];
@@ -47,6 +57,8 @@ const icons = {
 const state = {
   inventory: [],
   packages: [],
+  categories: [],
+  hiddenCategories: [],
   meta: { lastBackupAt: "", changedAt: "" },
   persisted: false,
   ui: {
@@ -116,7 +128,16 @@ async function commit(message, { touch = true } = {}) {
   if (touch) state.meta.changedAt = new Date().toISOString();
   try {
     await idb("readwrite", (store) =>
-      store.put({ inventory: state.inventory, packages: state.packages, meta: state.meta }, DATA_KEY),
+      store.put(
+        {
+          inventory: state.inventory,
+          packages: state.packages,
+          categories: state.categories,
+          hiddenCategories: state.hiddenCategories,
+          meta: state.meta,
+        },
+        DATA_KEY,
+      ),
     );
   } catch (error) {
     render();
@@ -133,7 +154,18 @@ function normalizeData(raw) {
   const now = new Date().toISOString();
   const str = (value, max = 300) => (value == null ? "" : String(value)).trim().slice(0, max);
   const isoDate = (value) => (/^\d{4}-\d{2}-\d{2}$/.test(value) ? value : "");
-  const categoryIds = new Set(categories.map((category) => category.id));
+  const baseIds = baseCategories.map((category) => category.id);
+  const hiddenCategories = baseIds.filter((id) => Array.isArray(raw.hiddenCategories) && raw.hiddenCategories.includes(id));
+  const categoryIds = new Set(baseIds);
+  const customCategories = (Array.isArray(raw.categories) ? raw.categories : [])
+    .filter((category) => category && typeof category === "object" && str(category.label))
+    .map((category) => {
+      let id = str(category.id, 64);
+      if (!id || categoryIds.has(id)) id = uid();
+      categoryIds.add(id);
+      return { id, label: str(category.label, 40) };
+    });
+  hiddenCategories.forEach((id) => categoryIds.delete(id));
   const seen = new Set();
 
   const inventory = (Array.isArray(raw.inventory) ? raw.inventory : [])
@@ -145,7 +177,9 @@ function normalizeData(raw) {
       return {
         id,
         name: str(item.name, 120),
-        category: categoryIds.has(item.category) ? item.category : "gadgets",
+        category: categoryIds.has(item.category) ? item.category : UNCATEGORIZED.id,
+        description: str(item.description, 2000),
+        quantity: Math.min(Math.max(Math.trunc(Number(item.quantity)) || 1, 1), 9999),
         serial: str(item.serial, 80),
         location: str(item.location, 120),
         status: manualStatuses.includes(item.status) ? item.status : "disponible",
@@ -173,6 +207,9 @@ function normalizeData(raw) {
         date: isoDate(pkg.date || pkg.session_date),
         notes: str(pkg.notes, 2000),
         items,
+        units: Object.fromEntries(
+          items.filter((id) => Number(pkg.units?.[id]) >= 1).map((id) => [id, Math.min(Math.trunc(Number(pkg.units[id])), 9999)]),
+        ),
         checklist: { salida: checks("salida"), regreso: checks("regreso") },
         closed_at: str(pkg.closed_at, 40) || null,
         created_at: str(pkg.created_at, 40) || now,
@@ -182,6 +219,8 @@ function normalizeData(raw) {
   return {
     inventory,
     packages,
+    categories: customCategories,
+    hiddenCategories,
     meta: { lastBackupAt: str(raw.meta?.lastBackupAt, 40), changedAt: str(raw.meta?.changedAt, 40) },
   };
 }
@@ -226,8 +265,27 @@ function inventoryById(id) {
   return state.inventory.find((item) => item.id === id);
 }
 
+// Units taken to a production; defaults to all of them and never exceeds what exists.
+function unitsIn(pkg, item) {
+  return Math.min(pkg.units[item.id] || item.quantity, item.quantity);
+}
+
+function qty(item) {
+  return item.quantity > 1 ? ` <span class="small">×${item.quantity}</span>` : "";
+}
+
 function categoryById(id) {
-  return categories.find((category) => category.id === id) || categories[0];
+  return allCategories().find((category) => category.id === id) || UNCATEGORIZED;
+}
+
+function allCategories() {
+  return [...baseCategories.filter((c) => !state.hiddenCategories.includes(c.id)), ...state.categories];
+}
+
+// "Sin categoría" only shows up while some item is in it.
+function listedCategories() {
+  const orphans = state.inventory.some((item) => item.category === UNCATEGORIZED.id);
+  return orphans ? [...allCategories(), UNCATEGORIZED] : allCategories();
 }
 
 // ---------- Rendering ----------
@@ -352,10 +410,10 @@ function renderDashboard() {
       <div>
         <div class="section-header"><h3>Categorías</h3></div>
         <div class="category-strip">
-          ${categories
+          ${listedCategories()
             .map((category) => {
               const count = state.inventory.filter((item) => item.category === category.id).length;
-              return `<button class="chip" data-category-jump="${category.id}">${category.label} <b>${count}</b></button>`;
+              return `<button class="chip" data-category-jump="${esc(category.id)}">${esc(category.label)} <b>${count}</b></button>`;
             })
             .join("")}
         </div>
@@ -417,12 +475,16 @@ function renderLoanRow(item) {
 
 function renderInventoryView() {
   const chip = (id, label) =>
-    `<button class="chip ${state.ui.category === id ? "is-active" : ""}" data-category="${id}">${label}</button>`;
+    `<button class="chip ${state.ui.category === id ? "is-active" : ""}" data-category="${esc(id)}">${esc(label)}</button>`;
 
   return `
     ${renderTopbar("Inventario", "", `<button class="button primary" data-open-modal="item">+ Nuevo material</button>`)}
     <section>
-      <div class="category-strip">${chip("todos", "Todos")}${categories.map((c) => chip(c.id, c.label)).join("")}</div>
+      <div class="category-strip">${chip("todos", "Todos")}${listedCategories().map((c) => chip(c.id, c.label)).join("")}
+        <button class="chip" data-add-category>+ Categoría</button>
+        ${state.categories.some((c) => c.id === state.ui.category) ? `<button class="chip" data-rename-category>${icon("edit")} Renombrar</button>` : ""}
+        ${allCategories().some((c) => c.id === state.ui.category) ? `<button class="chip danger" data-delete-category>${icon("trash")} Borrar</button>` : ""}
+      </div>
       <div class="toolbar">
         <input type="search" data-search placeholder="Buscar nombre, serial, ubicación o persona" value="${esc(state.ui.search)}" />
         <select data-status-filter aria-label="Filtrar por estado">
@@ -447,7 +509,7 @@ function renderInventoryRows() {
     const matchesCategory = state.ui.category === "todos" || item.category === state.ui.category;
     const matchesSearch =
       !search ||
-      [item.name, item.serial, item.location, item.notes, item.loan_to].some((value) =>
+      [item.name, item.description, item.serial, item.location, item.notes, item.loan_to].some((value) =>
         value.toLowerCase().includes(search),
       );
     const matchesStatus = state.ui.statusFilter === "todos" || displayStatus(item) === state.ui.statusFilter;
@@ -464,9 +526,9 @@ function renderItemRow(item) {
   const status = displayStatus(item);
   const details = [categoryById(item.category).label, item.serial, item.location].filter(Boolean).map(esc).join(" · ");
   return `
-    <article class="card item-row ${item.loan_to ? "is-loaned" : ""}">
+    <article class="card item-row ${item.loan_to ? "is-loaned" : ""}" data-peek-item="${esc(item.id)}">
       <div class="item-title">
-        <strong>${esc(item.name)}</strong>
+        <strong>${esc(item.name)}${qty(item)}</strong>
         <span>${details}</span>
         ${item.loan_to ? `<span class="loan-line">Prestado a ${esc(item.loan_to)}${item.loan_since ? ` · ${daysAgo(item.loan_since)}` : ""}</span>` : ""}
       </div>
@@ -480,6 +542,24 @@ function renderItemRow(item) {
         <button class="button icon-only danger" aria-label="Eliminar ${esc(item.name)}" data-delete-item="${esc(item.id)}">${icon("trash")}</button>
       </div>
     </article>
+  `;
+}
+
+function renderPeek(item) {
+  const details = [
+    ["Categoría", categoryById(item.category).label],
+    ["Unidades", item.quantity],
+    ["Serial", item.serial],
+    ["Ubicación", item.location],
+    ["Estado", statusLabels[displayStatus(item)]],
+    ["Condición", item.condition],
+    ["Prestado a", item.loan_to],
+  ].filter(([, value]) => value);
+  return `
+    <strong>${esc(item.name)}</strong>
+    <p>${item.description ? esc(item.description) : `<span class="small">Sin descripción.</span>`}</p>
+    <dl>${details.map(([label, value]) => `<dt>${label}</dt><dd>${esc(value)}</dd>`).join("")}</dl>
+    ${item.notes ? `<p class="small"><b>Notas:</b> ${esc(item.notes)}</p>` : ""}
   `;
 }
 
@@ -559,7 +639,7 @@ function renderPackageDetail(pkg) {
                     <label class="check-row ${checked ? "is-checked" : ""}">
                       <input type="checkbox" data-check-item="${esc(item.id)}" ${checked ? "checked" : ""} ${closed ? "disabled" : ""} />
                       <span>
-                        <strong>${esc(item.name)}</strong>
+                        <strong>${esc(item.name)}${item.quantity > 1 ? ` <span class="small">×${unitsIn(pkg, item)}</span>` : ""}</strong>
                         <div class="small">${[categoryById(item.category).label, item.serial].filter(Boolean).map(esc).join(" · ")}</div>
                       </span>
                     </label>
@@ -656,18 +736,29 @@ function renderItemModal(item) {
           </div>
           <div class="field">
             <label for="f-category">Categoría</label>
-            <select id="f-category" name="category">${options(categories.map((c) => [c.id, c.label]), category)}</select>
+            <select id="f-category" name="category">
+              ${category === UNCATEGORIZED.id ? `<option value="" disabled selected>${UNCATEGORIZED.label}</option>` : ""}
+              ${options(allCategories().map((c) => [esc(c.id), esc(c.label)]), category)}
+            </select>
           </div>
         </div>
+        <div class="field">
+          <label for="f-description">Descripción</label>
+          <textarea id="f-description" name="description" maxlength="2000" placeholder="Qué es: modelo, specs, accesorios incluidos">${esc(item?.description || "")}</textarea>
+        </div>
         <div class="split">
+          <div class="field">
+            <label for="f-quantity">Unidades</label>
+            <input id="f-quantity" name="quantity" type="number" min="1" max="9999" step="1" required value="${item?.quantity || 1}" />
+          </div>
           <div class="field">
             <label for="f-serial">Serial / placa</label>
             <input id="f-serial" name="serial" maxlength="80" value="${esc(item?.serial || "")}" />
           </div>
-          <div class="field">
-            <label for="f-location">Ubicación</label>
-            <input id="f-location" name="location" maxlength="120" placeholder="Ej. Maleta 1" value="${esc(item?.location || "")}" />
-          </div>
+        </div>
+        <div class="field">
+          <label for="f-location">Ubicación</label>
+          <input id="f-location" name="location" maxlength="120" placeholder="Ej. Maleta 1" value="${esc(item?.location || "")}" />
         </div>
         <div class="split">
           <div class="field">
@@ -694,7 +785,7 @@ function renderItemModal(item) {
         </fieldset>
         <div class="field">
           <label for="f-notes">Notas</label>
-          <textarea id="f-notes" name="notes" maxlength="2000">${esc(item?.notes || "")}</textarea>
+          <textarea id="f-notes" name="notes" maxlength="2000" placeholder="Observaciones: golpes, fallas, a quién se le compró...">${esc(item?.notes || "")}</textarea>
         </div>
         <div class="actions">
           <button class="button primary" type="submit">${isEdit ? "Guardar cambios" : "Guardar"}</button>
@@ -758,8 +849,13 @@ function renderPackageItemsModal() {
                     <label class="selectable ${blocked ? "is-blocked" : ""}" data-pick-text="${esc(`${item.name} ${item.serial} ${categoryById(item.category).label}`.toLowerCase())}">
                       <input type="checkbox" name="items" value="${esc(item.id)}" ${selected.has(item.id) ? "checked" : ""} ${blocked ? "disabled" : ""} />
                       <span>
-                        <strong>${esc(item.name)}</strong>
+                        <strong>${esc(item.name)}${qty(item)}</strong>
                         <div class="small">${[categoryById(item.category).label, item.serial].filter(Boolean).map(esc).join(" · ")}</div>
+                        ${
+                          item.quantity > 1
+                            ? `<div class="small units-pick">Llevar <input type="number" name="units-${esc(item.id)}" min="1" max="${item.quantity}" step="1" value="${unitsIn(pkg, item)}" aria-label="Unidades de ${esc(item.name)}" ${blocked ? "disabled" : ""} /> de ${item.quantity}</div>`
+                            : ""
+                        }
                       </span>
                       <span class="tag ${statusClass[status]}">${statusLabels[status]}</span>
                     </label>
@@ -786,6 +882,9 @@ const clickActions = [
   ["data-category", (el) => ((state.ui.category = el.dataset.category), render())],
   ["data-category-jump", (el) => ((state.ui.category = el.dataset.categoryJump), (state.ui.statusFilter = "todos"), setView("inventory"))],
   ["data-status-jump", (el) => ((state.ui.statusFilter = el.dataset.statusJump), (state.ui.category = "todos"), setView("inventory"))],
+  ["data-add-category", () => saveCategory()],
+  ["data-rename-category", () => saveCategory(state.categories.find((c) => c.id === state.ui.category))],
+  ["data-delete-category", () => deleteCategory(state.ui.category)],
   ["data-edit-item", (el) => openModal({ type: "item", itemId: el.dataset.editItem })],
   ["data-delete-item", (el) => deleteInventoryItem(el.dataset.deleteItem)],
   ["data-return-loan", (el) => returnLoan(el.dataset.returnLoan)],
@@ -837,6 +936,25 @@ document.addEventListener("submit", (event) => {
   if (form.matches("[data-package-items-form]")) savePackageItemsFromForm(form);
 });
 
+// Press and hold an inventory row (finger or mouse) to preview its details; release to hide.
+const peek = Object.assign(document.createElement("div"), { className: "peek card", hidden: true });
+document.body.append(peek);
+let peekTimer = null;
+
+document.addEventListener("pointerdown", (event) => {
+  const row = event.target.closest("[data-peek-item]");
+  if (!row || event.button > 0 || event.target.closest("button")) return;
+  peekTimer = setTimeout(() => {
+    const item = inventoryById(row.dataset.peekItem);
+    if (item) (peek.innerHTML = renderPeek(item)), (peek.hidden = false);
+  }, 400);
+});
+["pointerup", "pointercancel", "scroll"].forEach((type) =>
+  document.addEventListener(type, () => (clearTimeout(peekTimer), (peek.hidden = true)), true),
+);
+// Otherwise a long press opens the phone's context menu instead of the preview.
+document.addEventListener("contextmenu", (event) => event.target.closest("[data-peek-item]") && event.preventDefault());
+
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && modal) closeModal();
 });
@@ -871,7 +989,10 @@ async function saveItemFromForm(form, again) {
   const id = form.dataset.id;
   const payload = {
     name: data.name.trim(),
-    category: data.category,
+    // Empty when the item sits in "Sin categoría" and the user didn't pick a new one.
+    category: data.category || UNCATEGORIZED.id,
+    description: data.description.trim(),
+    quantity: Math.min(Math.max(Math.trunc(Number(data.quantity)) || 1, 1), 9999),
     serial: data.serial.trim(),
     location: data.location.trim(),
     status: manualStatuses.includes(data.status) ? data.status : "disponible",
@@ -896,6 +1017,29 @@ async function saveItemFromForm(form, again) {
   if (await commit(id ? "Material actualizado." : `"${payload.name}" guardado.`)) {
     if (again) document.querySelector("#f-name")?.focus();
   }
+}
+
+async function saveCategory(existing) {
+  const label = prompt(existing ? "Nuevo nombre de la categoría" : "Nombre de la nueva categoría", existing?.label || "")?.trim().slice(0, 40);
+  if (!label || label === existing?.label) return;
+  const clash = allCategories().find((c) => c !== existing && c.label.toLowerCase() === label.toLowerCase());
+  if (clash) return showToast(`Ya existe la categoría "${clash.label}".`, "danger");
+  if (existing) existing.label = label;
+  else state.categories.push({ id: (state.ui.category = uid()), label });
+  await commit(existing ? "Categoría renombrada." : `Categoría "${label}" creada.`);
+}
+
+async function deleteCategory(id) {
+  const category = allCategories().find((c) => c.id === id);
+  if (!category) return;
+  const items = state.inventory.filter((item) => item.category === id);
+  const warning = items.length ? `\n\n${items.length} equipos quedarán en "${UNCATEGORIZED.label}".` : "";
+  if (!confirm(`¿Borrar la categoría "${category.label}"?${warning}`)) return;
+  items.forEach((item) => (item.category = UNCATEGORIZED.id));
+  if (state.categories.includes(category)) state.categories = state.categories.filter((c) => c !== category);
+  else state.hiddenCategories.push(id);
+  state.ui.category = "todos";
+  await commit("Categoría borrada.");
 }
 
 async function deleteInventoryItem(id) {
@@ -931,6 +1075,7 @@ async function savePackageFromForm(form) {
     date: data.date,
     notes: data.notes.trim(),
     items: [],
+    units: {},
     checklist: { salida: {}, regreso: {} },
     closed_at: null,
     created_at: new Date().toISOString(),
@@ -946,9 +1091,13 @@ async function savePackageFromForm(form) {
 async function savePackageItemsFromForm(form) {
   const pkg = getPackage();
   if (!pkg) return;
-  const items = new FormData(form).getAll("items").filter((id) => inventoryById(id));
+  const data = new FormData(form);
+  const items = data.getAll("items").filter((id) => inventoryById(id));
   const keep = (checks) => Object.fromEntries(Object.entries(checks).filter(([id]) => items.includes(id)));
   pkg.items = items;
+  pkg.units = Object.fromEntries(
+    items.map((id) => [id, Math.min(Math.max(Math.trunc(Number(data.get(`units-${id}`))) || 1, 1), inventoryById(id).quantity)]),
+  );
   pkg.checklist = { salida: keep(pkg.checklist.salida), regreso: keep(pkg.checklist.regreso) };
   modal = null;
   await commit("Material actualizado.");
@@ -969,13 +1118,17 @@ async function finishPackage(id) {
   const pkg = state.packages.find((entry) => entry.id === id);
   if (!pkg) return;
   const missing = checklistItems(pkg, "regreso").filter((itemId) => !pkg.checklist.regreso[itemId]);
-  const names = missing.map((itemId) => inventoryById(itemId)?.name).filter(Boolean);
+  const names = missing
+    .map((itemId) => inventoryById(itemId))
+    .filter(Boolean)
+    .map((item) => (item.quantity > 1 ? `${item.name} ×${unitsIn(pkg, item)}` : item.name));
   const message = names.length
     ? `Faltan por regresar ${names.length} equipos:\n\n- ${names.join("\n- ")}\n\nQuedarán marcados como "Extraviado" para que los busques. ¿Finalizar?`
     : "¿Finalizar la producción? El material quedará disponible otra vez.";
   if (!confirm(message)) return;
 
   const now = new Date().toISOString();
+  // shortcut: a missing multi-unit item marks the whole item as lost; split units if partial losses get common.
   missing.forEach((itemId) => {
     const item = inventoryById(itemId);
     if (item) Object.assign(item, { status: "perdido", updated_at: now });
@@ -993,6 +1146,7 @@ async function duplicatePackage(id) {
     name: `${source.name} (copia)`,
     date: "",
     items: source.items.filter((itemId) => inventoryById(itemId)),
+    units: { ...source.units },
     checklist: { salida: {}, regreso: {} },
     closed_at: null,
     created_at: new Date().toISOString(),
@@ -1014,7 +1168,11 @@ async function deletePackage(id) {
 async function exportBackup() {
   const stamp = today();
   const json = JSON.stringify(
-    { app: "fotostock", version: 1, exportedAt: new Date().toISOString(), inventory: state.inventory, packages: state.packages },
+    { app: "fotostock", version: 1, exportedAt: new Date().toISOString(), inventory: state.inventory,
+      packages: state.packages,
+      categories: state.categories,
+      hiddenCategories: state.hiddenCategories,
+    },
     null,
     2,
   );
@@ -1075,6 +1233,8 @@ async function importBackup(input) {
 
   state.inventory = data.inventory;
   state.packages = data.packages;
+  state.categories = data.categories;
+  state.hiddenCategories = data.hiddenCategories;
   state.ui.packageId = null;
   await commit("Respaldo importado.");
 }

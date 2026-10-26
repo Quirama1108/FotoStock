@@ -1,5 +1,5 @@
 // Bump on every release so phones drop the old cached files.
-const CACHE = "fotostock-v1";
+const CACHE = "fotostock-v3";
 const SHELL = ["./", "index.html", "styles.css", "app.js", "manifest.json", "icons/icon.svg", "icons/icon-192.png", "icons/icon-512.png", "icons/icon-180.png"];
 
 self.addEventListener("install", (event) => {
