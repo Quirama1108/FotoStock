@@ -1,5 +1,13 @@
 # FotoStock
 
+> **Rama `mobile-pwa`: versión para teléfono.** App web instalable (PWA) que guarda todo en el dispositivo (IndexedDB), funciona sin internet y no necesita backend ni tienda de apps. La versión cloud (Lambda + Supabase) sigue en `main`.
+>
+> - **Probar en el PC:** `npm install` y luego `npm start` → http://localhost:8080
+> - **Pruebas (Chrome headless, vista de teléfono):** `npm test`
+> - **Instalar en el teléfono:** publica los archivos estáticos (`index.html`, `styles.css`, `app.js`, `sw.js`, `manifest.json`, `icons/`) en cualquier hosting HTTPS (GitHub Pages, S3 + CloudFront). Abre la URL en el teléfono → Android: menú ⋮ "Instalar app"; iPhone: Compartir → "Agregar a inicio".
+> - **Respaldo:** pestaña *Respaldo* → Exportar/Importar JSON. Los datos viven solo en ese dispositivo; respalda de vez en cuando.
+> - Al publicar una versión nueva, sube el número de `CACHE` en `sw.js` para que los teléfonos la actualicen.
+
 FotoStock es una aplicacion web para administrar inventario de material fotografico, preparar paquetes para producciones y validar checklist de salida/regreso. El proyecto fue desarrollado como entrega de Cloud Computing y despliega una solucion funcional combinando frontend estatico, backend serverless, persistencia, redes, seguridad, observabilidad y estimacion de costos.
 
 ## Demo

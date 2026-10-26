@@ -1,41 +1,60 @@
-const TOKEN_KEY = "fotostock-token";
-const API_BASE_URL = (window.FOTOSTOCK_CONFIG?.API_BASE_URL || "").replace(/\/$/, "");
+const DB_NAME = "fotostock";
+const STORE = "kv";
+const DATA_KEY = "data";
+const BACKUP_REMINDER_DAYS = 7;
 
 const categories = [
-  { id: "camaras", label: "Camaras" },
+  { id: "camaras", label: "Cámaras" },
   { id: "lentes", label: "Lentes" },
   { id: "flashes", label: "Flashes" },
-  { id: "tripodes", label: "Tripodes" },
+  { id: "tripodes", label: "Trípodes" },
   { id: "filtros", label: "Filtros" },
   { id: "triggers", label: "Triggers" },
   { id: "memorias", label: "Memorias" },
   { id: "gadgets", label: "Gadgets" },
 ];
 
+// Only these are stored; "paquete" and "prestado" are derived (see displayStatus).
+const manualStatuses = ["disponible", "mantenimiento", "perdido"];
+const conditions = ["Excelente", "Muy bueno", "Bueno", "Revision"];
+
 const statusLabels = {
   disponible: "Disponible",
   paquete: "En paquete",
+  prestado: "Prestado",
   mantenimiento: "Mantenimiento",
-  perdido: "No disponible",
+  perdido: "Extraviado",
 };
 
 const statusClass = {
   disponible: "success",
   paquete: "blue",
-  mantenimiento: "warning",
+  prestado: "loan",
+  mantenimiento: "purple",
   perdido: "danger",
+};
+
+const icons = {
+  dashboard: '<path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/>',
+  inventory: '<path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/>',
+  packages: '<path d="M10 6h10M10 12h10M10 18h10M3.5 6l1.5 1.5L7.5 5M3.5 12l1.5 1.5 2.5-2.5M3.5 18l1.5 1.5 2.5-2.5"/>',
+  backup: '<path d="M12 3v12M8 11l4 4 4-4M4 17v3h16v-3"/>',
+  edit: '<path d="M4 20h4L19 9l-4-4L4 16zM13 7l4 4"/>',
+  trash: '<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/>',
+  back: '<path d="M9 14l-4-4 4-4M5 10h10a4 4 0 010 8h-3"/>',
 };
 
 const state = {
   inventory: [],
   packages: [],
+  meta: { lastBackupAt: "", changedAt: "" },
+  persisted: false,
   ui: {
     view: "dashboard",
     category: "todos",
     packageId: null,
     checklistMode: "salida",
-    authMode: "login",
-    loading: false,
+    loading: true,
     error: "",
     search: "",
     statusFilter: "todos",
@@ -43,158 +62,186 @@ const state = {
   },
 };
 
-let session = loadSession();
 let modal = null;
 let toastTimer = null;
+let installPrompt = null;
+const dbPromise = openDb();
 
-render();
-if (session) refreshData();
+init();
 
-function loadSession() {
-  const token = localStorage.getItem(TOKEN_KEY);
-  if (!token) return null;
-
+async function init() {
+  render();
   try {
-    const payload = JSON.parse(atob(token.split(".")[1]));
-    if (payload.exp * 1000 < Date.now()) {
-      localStorage.removeItem(TOKEN_KEY);
-      return null;
-    }
-    return {
-      token,
-      id: payload.sub,
-      cedula: payload.cedula,
-      name: payload.name,
-      role: payload.role,
-    };
-  } catch {
-    localStorage.removeItem(TOKEN_KEY);
-    return null;
+    Object.assign(state, normalizeData((await idb("readonly", (store) => store.get(DATA_KEY))) || {}));
+  } catch (error) {
+    state.ui.error = `No se pudo abrir el almacenamiento de este navegador (${error?.message || error}). Si estás en modo incógnito, abre la app en una ventana normal.`;
   }
-}
-
-async function api(path, options = {}) {
-  if (!API_BASE_URL) throw new Error("No se pudo preparar la conexión. Intenta de nuevo más tarde.");
-
-  const headers = {
-    "content-type": "application/json",
-    ...(options.headers || {}),
-  };
-
-  if (session?.token) headers.authorization = `Bearer ${session.token}`;
-
-  let res;
-  try {
-    res = await fetch(`${API_BASE_URL}${path}`, {
-      ...options,
-      headers,
-      body: options.body ? JSON.stringify(options.body) : undefined,
-    });
-  } catch {
-    throw new Error(
-      "No se pudo conectar con el servicio. Revisa tu conexión e intenta de nuevo.",
-    );
-  }
-
-  const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
-  if (!res.ok) throw new Error(data?.error || "La API no pudo completar la acción.");
-  return data;
-}
-
-async function refreshData() {
-  if (!session) return;
-  state.ui.loading = true;
-  state.ui.error = "";
+  state.ui.loading = false;
   render();
 
-  try {
-    const [inventoryData, packageData] = await Promise.all([api("/inventory"), api("/packages")]);
-    state.inventory = inventoryData.inventory || [];
-    state.packages = normalizePackages(packageData.packages || []);
-    if (!state.ui.packageId || !state.packages.some((pkg) => pkg.id === state.ui.packageId)) {
-      state.ui.packageId = state.packages[0]?.id || null;
-    }
-  } catch (error) {
-    state.ui.error = error.message;
-  } finally {
-    state.ui.loading = false;
-    render();
-  }
+  navigator.storage?.persist?.().then((granted) => (state.persisted = granted)).catch(() => {});
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 }
 
-function normalizePackages(packages) {
-  return packages.map((pkg) => ({
-    ...pkg,
-    date: pkg.date || pkg.session_date || "",
-    items: pkg.items || [],
-    checklist: pkg.checklist || { salida: {}, regreso: {} },
-  }));
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  installPrompt = event;
+  if (state.ui.view === "backup") render();
+});
+
+// ---------- Local storage (IndexedDB) ----------
+
+function openDb() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, 1);
+    request.onupgradeneeded = () => request.result.createObjectStore(STORE);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
 }
+
+async function idb(mode, fn) {
+  const db = await dbPromise;
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, mode);
+    const request = fn(tx.objectStore(STORE));
+    tx.oncomplete = () => resolve(request.result);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
+// shortcut: whole dataset saved as one record, last write wins across tabs; fine for a personal gear list.
+async function commit(message, { touch = true } = {}) {
+  if (touch) state.meta.changedAt = new Date().toISOString();
+  try {
+    await idb("readwrite", (store) =>
+      store.put({ inventory: state.inventory, packages: state.packages, meta: state.meta }, DATA_KEY),
+    );
+  } catch (error) {
+    render();
+    showToast(`No se pudo guardar en el dispositivo: ${error?.message || error}`, "danger");
+    return false;
+  }
+  render();
+  if (message) showToast(message);
+  return true;
+}
+
+// Used both for stored data and for imported backups (untrusted input).
+function normalizeData(raw) {
+  const now = new Date().toISOString();
+  const str = (value, max = 300) => (value == null ? "" : String(value)).trim().slice(0, max);
+  const isoDate = (value) => (/^\d{4}-\d{2}-\d{2}$/.test(value) ? value : "");
+  const categoryIds = new Set(categories.map((category) => category.id));
+  const seen = new Set();
+
+  const inventory = (Array.isArray(raw.inventory) ? raw.inventory : [])
+    .filter((item) => item && typeof item === "object" && str(item.name))
+    .map((item) => {
+      let id = str(item.id, 64);
+      if (!id || seen.has(id)) id = uid();
+      seen.add(id);
+      return {
+        id,
+        name: str(item.name, 120),
+        category: categoryIds.has(item.category) ? item.category : "gadgets",
+        serial: str(item.serial, 80),
+        location: str(item.location, 120),
+        status: manualStatuses.includes(item.status) ? item.status : "disponible",
+        condition: conditions.includes(item.condition) ? item.condition : "Bueno",
+        notes: str(item.notes, 2000),
+        loan_to: str(item.loan_to, 120),
+        loan_since: isoDate(item.loan_since),
+        created_at: str(item.created_at, 40) || now,
+        updated_at: str(item.updated_at, 40) || now,
+      };
+    });
+
+  const packages = (Array.isArray(raw.packages) ? raw.packages : [])
+    .filter((pkg) => pkg && typeof pkg === "object" && str(pkg.name))
+    .map((pkg) => {
+      const items = [...new Set((Array.isArray(pkg.items) ? pkg.items : []).map(String))].filter((id) =>
+        seen.has(id),
+      );
+      const checks = (mode) =>
+        Object.fromEntries(items.filter((id) => pkg.checklist?.[mode]?.[id] === true).map((id) => [id, true]));
+      return {
+        id: str(pkg.id, 64) || uid(),
+        name: str(pkg.name, 120),
+        client: str(pkg.client, 120),
+        date: isoDate(pkg.date || pkg.session_date),
+        notes: str(pkg.notes, 2000),
+        items,
+        checklist: { salida: checks("salida"), regreso: checks("regreso") },
+        closed_at: str(pkg.closed_at, 40) || null,
+        created_at: str(pkg.created_at, 40) || now,
+      };
+    });
+
+  return {
+    inventory,
+    packages,
+    meta: { lastBackupAt: str(raw.meta?.lastBackupAt, 40), changedAt: str(raw.meta?.changedAt, 40) },
+  };
+}
+
+// ---------- Derived data ----------
+
+function displayStatus(item) {
+  if (item.loan_to) return "prestado";
+  if (item.status !== "disponible") return item.status;
+  return openPackages().some((pkg) => pkg.items.includes(item.id)) ? "paquete" : "disponible";
+}
+
+function openPackages() {
+  return state.packages.filter((pkg) => !pkg.closed_at);
+}
+
+function getPackage() {
+  return (
+    state.packages.find((pkg) => pkg.id === state.ui.packageId) || openPackages()[0] || state.packages[0] || null
+  );
+}
+
+// Return checklist only covers what actually left at salida.
+function checklistItems(pkg, mode) {
+  return mode === "salida" ? pkg.items : pkg.items.filter((id) => pkg.checklist.salida[id]);
+}
+
+function packageProgress(pkg, mode) {
+  const items = checklistItems(pkg, mode);
+  if (!items.length) return 0;
+  return Math.round((items.filter((id) => pkg.checklist[mode][id]).length / items.length) * 100);
+}
+
+function needsBackup() {
+  if (!state.inventory.length) return false;
+  if (!state.meta.lastBackupAt) return true;
+  const stale = Date.now() - Date.parse(state.meta.lastBackupAt) > BACKUP_REMINDER_DAYS * 864e5;
+  return stale && state.meta.changedAt > state.meta.lastBackupAt;
+}
+
+function inventoryById(id) {
+  return state.inventory.find((item) => item.id === id);
+}
+
+function categoryById(id) {
+  return categories.find((category) => category.id === id) || categories[0];
+}
+
+// ---------- Rendering ----------
 
 function render() {
-  document.querySelector("#app").innerHTML = session ? renderShell() : renderAuth();
-  bindEvents();
-}
-
-function renderAuth() {
-  const isRegister = state.ui.authMode === "register";
-  return `
-    <main class="auth-page">
-      <section class="auth-art">
-        <div class="auth-copy">
-          <div class="eyebrow">Inventario fotográfico</div>
-          <h2>Material listo antes y después de cada producción.</h2>
-          <p>Controla camaras, lentes, luces y accesorios con paquetes de salida y checklist de regreso.</p>
-        </div>
-      </section>
-      <section class="auth-panel">
-        <form class="auth-card card" data-auth-form>
-          <div class="auth-brand">
-            <span class="brand-mark"></span>
-            <div>
-              <h1>FotoStock</h1>
-              <span>${isRegister ? "Crear cuenta" : "Inventario de producción"}</span>
-            </div>
-          </div>
-          <h3>${isRegister ? "Crear cuenta" : "Iniciar sesion"}</h3>
-          <p>${isRegister ? "Crea tu perfil para administrar tu propio material." : "Ingresa con tu cédula y contraseña para continuar."}</p>
-          <div class="form-stack">
-            ${
-              isRegister
-                ? `
-                  <div class="field">
-                    <label for="name">Nombre</label>
-                    <input id="name" name="name" autocomplete="name" placeholder="Ej. Laura Perez" required minlength="3" />
-                  </div>
-                `
-                : ""
-            }
-            <div class="field">
-              <label for="cedula">Cédula</label>
-              <input id="cedula" name="cedula" inputmode="numeric" autocomplete="username" placeholder="Ej. 1037654321" required minlength="6" />
-            </div>
-            <div class="field">
-              <label for="password">Contraseña</label>
-              <input id="password" name="password" type="password" autocomplete="${isRegister ? "new-password" : "current-password"}" placeholder="Minimo 6 caracteres" required minlength="6" />
-            </div>
-            <button class="button primary" type="submit">${isRegister ? "Crear cuenta" : "Entrar"}</button>
-            <button class="button ghost" type="button" data-toggle-auth>
-              ${isRegister ? "Ya tengo cuenta" : "Crear una cuenta"}
-            </button>
-          </div>
-          ${state.ui.error ? `<div class="notice danger">${state.ui.error}</div>` : ""}
-        </form>
-      </section>
-    </main>
-  `;
+  document.querySelector("#app").innerHTML = renderShell();
 }
 
 function renderShell() {
   const nav = [
-    ["dashboard", "Panel", "DB"],
-    ["inventory", "Inventario", "IN"],
-    ["packages", "Paquetes", "OK"],
+    ["dashboard", "Panel"],
+    ["inventory", "Inventario"],
+    ["packages", "Producciones"],
+    ["backup", "Respaldo"],
   ];
 
   return `
@@ -210,25 +257,16 @@ function renderShell() {
         <nav class="nav">
           ${nav
             .map(
-              ([id, label, icon]) => `
+              ([id, label]) => `
                 <button class="nav-button ${state.ui.view === id ? "is-active" : ""}" data-view="${id}">
-                  <span class="icon">${icon}</span>
+                  ${icon(id)}
                   <span>${label}</span>
                 </button>
               `,
             )
             .join("")}
         </nav>
-        <div class="sidebar-footer">
-          <div class="user-pill">
-            <span class="avatar">${(session.name || session.cedula).slice(0, 2).toUpperCase()}</span>
-            <div>
-              <strong>${session.name}</strong>
-              <div>C.C. ${session.cedula}</div>
-            </div>
-          </div>
-          <button class="button ghost" data-logout>Cerrar sesion</button>
-        </div>
+        <div class="sidebar-footer">Tus datos se guardan solo en este dispositivo.</div>
       </aside>
       <main class="main">
         ${renderActiveView()}
@@ -239,25 +277,17 @@ function renderShell() {
 }
 
 function renderActiveView() {
-  if (state.ui.loading) return renderLoading();
-  if (state.ui.error) return renderError();
+  if (state.ui.loading) return `<section class="card empty">Cargando inventario...</section>`;
+  if (state.ui.error) {
+    return `
+      ${renderTopbar("No se pudo cargar", "", `<button class="button primary" data-reload>Reintentar</button>`)}
+      <section class="card empty">${esc(state.ui.error)}</section>
+    `;
+  }
   if (state.ui.view === "inventory") return renderInventoryView();
   if (state.ui.view === "packages") return renderPackagesView();
+  if (state.ui.view === "backup") return renderBackupView();
   return renderDashboard();
-}
-
-function renderLoading() {
-  return `
-    ${renderTopbar("Cargando", "Preparando tu inventario y paquetes de producción.")}
-    <section class="card empty">Cargando información...</section>
-  `;
-}
-
-function renderError() {
-  return `
-    ${renderTopbar("No se pudo cargar", "Algo impidió traer tu información. Puedes intentar nuevamente.", `<button class="button primary" data-refresh>Reintentar</button>`)}
-    <section class="card empty">${state.ui.error}</section>
-  `;
 }
 
 function renderTopbar(title, subtitle, actions = "") {
@@ -265,180 +295,189 @@ function renderTopbar(title, subtitle, actions = "") {
     <header class="topbar">
       <div class="page-title">
         <h2>${title}</h2>
-        <p>${subtitle}</p>
+        ${subtitle ? `<p>${subtitle}</p>` : ""}
       </div>
       <div class="actions">${actions}</div>
     </header>
   `;
 }
 
+function renderBackupBanner() {
+  if (!needsBackup()) return "";
+  const last = state.meta.lastBackupAt ? `Último respaldo: ${formatDate(state.meta.lastBackupAt)}.` : "Aún no has hecho ningún respaldo.";
+  return `
+    <div class="notice warning banner">
+      <span><strong>Tu inventario solo vive en este dispositivo.</strong> ${last} Si borras el navegador o cambias de teléfono lo perderías.</span>
+      <button class="button primary" data-export>Respaldar ahora</button>
+    </div>
+  `;
+}
+
 function renderDashboard() {
-  const total = state.inventory.length;
-  const available = state.inventory.filter((item) => item.status === "disponible").length;
-  const inPackage = state.inventory.filter((item) => item.status === "paquete").length;
-  const maintenance = state.inventory.filter((item) => item.status === "mantenimiento").length;
-  const pkg = getPackage();
+  const counts = state.inventory.reduce((acc, item) => {
+    const status = displayStatus(item);
+    acc[status] = (acc[status] || 0) + 1;
+    return acc;
+  }, {});
+  const loaned = state.inventory.filter((item) => item.loan_to);
+  const pkg = openPackages()[0];
 
   return `
     ${renderTopbar(
-      "Panel de control",
-      "Resumen del material disponible, reservado y pendiente de revisión.",
+      "Panel",
+      "",
       `<button class="button primary" data-open-modal="item">+ Material</button>
-       <button class="button" data-open-modal="package">+ Paquete</button>`,
+       <button class="button" data-open-modal="package">+ Producción</button>`,
     )}
+    ${renderBackupBanner()}
     <section class="grid stats-grid">
-      ${renderMetric("Material total", total, "Registros en BD")}
-      ${renderMetric("Disponible", available, "Listo para asignar")}
-      ${renderMetric("En paquete", inPackage, "Reservado")}
-      ${renderMetric("Revision", maintenance, "Requiere atencion")}
+      ${renderMetric("Total", state.inventory.length, "todos")}
+      ${renderMetric("Disponible", counts.disponible || 0, "disponible")}
+      ${renderMetric("En paquete", counts.paquete || 0, "paquete")}
+      ${renderMetric("Prestado", counts.prestado || 0, "prestado")}
+      ${renderMetric("Mantenimiento", counts.mantenimiento || 0, "mantenimiento")}
+      ${counts.perdido ? renderMetric("Extraviado", counts.perdido, "perdido") : ""}
     </section>
+    ${
+      loaned.length
+        ? `
+          <section class="section card loan-panel">
+            <div class="section-header"><h3>Equipo prestado</h3></div>
+            <div class="list-compact">${loaned.map(renderLoanRow).join("")}</div>
+          </section>
+        `
+        : ""
+    }
     <section class="section grid content-grid">
       <div>
-        <div class="section-header">
-          <div>
-            <h3>Categorias</h3>
-            <p>Distribucion actual por tipo de equipo.</p>
-          </div>
+        <div class="section-header"><h3>Categorías</h3></div>
+        <div class="category-strip">
+          ${categories
+            .map((category) => {
+              const count = state.inventory.filter((item) => item.category === category.id).length;
+              return `<button class="chip" data-category-jump="${category.id}">${category.label} <b>${count}</b></button>`;
+            })
+            .join("")}
         </div>
-        <div class="grid stats-grid">${categories.map(renderCategoryMetric).join("")}</div>
         <div class="section-header section">
-          <div>
-            <h3>Material reciente</h3>
-            <p>Ultimos elementos registrados.</p>
-          </div>
-          <button class="button ghost" data-view="inventory">Ver inventario</button>
+          <h3>Material reciente</h3>
+          <button class="button ghost" data-view="inventory">Ver todo</button>
         </div>
         <div class="inventory-list">
-          ${state.inventory.length ? state.inventory.slice(0, 5).map(renderItemRow).join("") : `<div class="card empty">Aun no hay material. Agrega el primer elemento.</div>`}
+          ${
+            state.inventory.length
+              ? state.inventory.slice(0, 5).map(renderItemRow).join("")
+              : `<div class="card empty">Aún no hay material. Agrega el primer equipo con "+ Material".</div>`
+          }
         </div>
       </div>
       <aside class="side-panel card">
         <div class="section-header">
           <div>
-            <h3>Paquete activo</h3>
-            <p>${pkg ? pkg.name : "Sin paquetes creados"}</p>
+            <h3>Producción activa</h3>
+            <p>${pkg ? esc(pkg.name) : "Ninguna en curso"}</p>
           </div>
         </div>
         ${
           pkg
             ? `
               <div class="list-compact">
-                ${renderProgress("Salida", packageProgress(pkg, "salida"))}
-                ${renderProgress("Regreso", packageProgress(pkg, "regreso"))}
-                ${pkg.items
-                  .slice(0, 4)
-                  .map((id) => {
-                    const item = inventoryById(id);
-                    return item
-                      ? `<div class="compact-row"><span>${item.name}</span><span class="tag">${categoryById(item.category).label}</span></div>`
-                      : "";
-                  })
-                  .join("")}
-                <button class="button primary" data-view="packages">Abrir checklist</button>
+                ${renderProgress("Salida", pkg, "salida")}
+                ${renderProgress("Regreso", pkg, "regreso")}
+                <button class="button primary" data-select-package="${esc(pkg.id)}">Abrir checklist</button>
               </div>
             `
-            : `<div class="empty">Crea un paquete para preparar una producción.</div>`
+            : `<div class="empty small-empty">Crea una producción para preparar el material.</div>`
         }
       </aside>
     </section>
   `;
 }
 
-function renderMetric(label, value, trend) {
+function renderMetric(label, value, status) {
   return `
-    <article class="card metric">
+    <button class="card metric ${status === "prestado" && value ? "is-loan" : ""}" data-status-jump="${status}">
       <span>${label}</span>
       <b>${value}</b>
-      <div class="trend">${trend}</div>
-    </article>
-  `;
-}
-
-function renderCategoryMetric(category) {
-  const count = state.inventory.filter((item) => item.category === category.id).length;
-  return `
-    <button class="card metric" data-category-jump="${category.id}">
-      <span>${category.label}</span>
-      <b>${count}</b>
-      <div class="trend">Material registrado</div>
     </button>
   `;
 }
 
+function renderLoanRow(item) {
+  return `
+    <div class="compact-row loan-row">
+      <span>
+        <strong>${esc(item.name)}</strong>
+        <div class="small">${esc(item.loan_to)}${item.loan_since ? ` · ${daysAgo(item.loan_since)}` : ""}</div>
+      </span>
+      <button class="button" data-return-loan="${esc(item.id)}">Devuelto</button>
+    </div>
+  `;
+}
+
 function renderInventoryView() {
-  const categoryOptions = [
-    `<button class="chip ${state.ui.category === "todos" ? "is-active" : ""}" data-category="todos">Todos</button>`,
-    ...categories.map(
-      (category) => `
-        <button class="chip ${state.ui.category === category.id ? "is-active" : ""}" data-category="${category.id}">
-          ${category.label}
-        </button>
-      `,
-    ),
-  ].join("");
+  const chip = (id, label) =>
+    `<button class="chip ${state.ui.category === id ? "is-active" : ""}" data-category="${id}">${label}</button>`;
 
   return `
-    ${renderTopbar(
-      "Inventario",
-      "Administra el material fotográfico y mantenlo listo para cada producción.",
-      `<button class="button primary" data-open-modal="item">+ Nuevo material</button>`,
-    )}
-    <section class="section">
-      <div class="category-strip">${categoryOptions}</div>
+    ${renderTopbar("Inventario", "", `<button class="button primary" data-open-modal="item">+ Nuevo material</button>`)}
+    <section>
+      <div class="category-strip">${chip("todos", "Todos")}${categories.map((c) => chip(c.id, c.label)).join("")}</div>
       <div class="toolbar">
-        <input data-search placeholder="Buscar por nombre, serial o ubicacion" value="${escapeAttr(state.ui.search)}" />
-        <select data-status-filter>
+        <input type="search" data-search placeholder="Buscar nombre, serial, ubicación o persona" value="${esc(state.ui.search)}" />
+        <select data-status-filter aria-label="Filtrar por estado">
           <option value="todos">Todos los estados</option>
           ${Object.entries(statusLabels)
             .map(([value, label]) => `<option value="${value}" ${state.ui.statusFilter === value ? "selected" : ""}>${label}</option>`)
             .join("")}
         </select>
-        <select data-condition-filter>
+        <select data-condition-filter aria-label="Filtrar por condición">
           <option value="todos">Todas las condiciones</option>
-          ${["Excelente", "Muy bueno", "Bueno", "Revision"].map((value) => `<option ${state.ui.conditionFilter === value ? "selected" : ""}>${value}</option>`).join("")}
+          ${conditions.map((value) => `<option ${state.ui.conditionFilter === value ? "selected" : ""}>${value}</option>`).join("")}
         </select>
       </div>
-      <div class="inventory-list">${renderInventoryRows()}</div>
+      <div class="inventory-list" data-rows>${renderInventoryRows()}</div>
     </section>
   `;
 }
 
 function renderInventoryRows() {
-  const search = state.ui.search.toLowerCase();
+  const search = state.ui.search.trim().toLowerCase();
   const rows = state.inventory.filter((item) => {
     const matchesCategory = state.ui.category === "todos" || item.category === state.ui.category;
     const matchesSearch =
       !search ||
-      [item.name, item.serial, item.location, item.notes || ""].some((value) =>
-        String(value).toLowerCase().includes(search),
+      [item.name, item.serial, item.location, item.notes, item.loan_to].some((value) =>
+        value.toLowerCase().includes(search),
       );
-    const matchesStatus = state.ui.statusFilter === "todos" || item.status === state.ui.statusFilter;
-    const matchesCondition =
-      state.ui.conditionFilter === "todos" || item.condition === state.ui.conditionFilter;
+    const matchesStatus = state.ui.statusFilter === "todos" || displayStatus(item) === state.ui.statusFilter;
+    const matchesCondition = state.ui.conditionFilter === "todos" || item.condition === state.ui.conditionFilter;
     return matchesCategory && matchesSearch && matchesStatus && matchesCondition;
   });
 
+  if (!state.inventory.length) return `<div class="card empty">Aún no hay material registrado.</div>`;
   if (!rows.length) return `<div class="card empty">No hay material con esos filtros.</div>`;
   return rows.map(renderItemRow).join("");
 }
 
 function renderItemRow(item) {
-  const category = categoryById(item.category);
+  const status = displayStatus(item);
+  const details = [categoryById(item.category).label, item.serial, item.location].filter(Boolean).map(esc).join(" · ");
   return `
-    <article class="card item-row">
-      <div class="item-main">
-        <span class="item-icon" aria-hidden="true"></span>
-        <div class="item-title">
-          <strong>${item.name}</strong>
-          <span>${item.serial} - ${category.label}</span>
-        </div>
+    <article class="card item-row ${item.loan_to ? "is-loaned" : ""}">
+      <div class="item-title">
+        <strong>${esc(item.name)}</strong>
+        <span>${details}</span>
+        ${item.loan_to ? `<span class="loan-line">Prestado a ${esc(item.loan_to)}${item.loan_since ? ` · ${daysAgo(item.loan_since)}` : ""}</span>` : ""}
       </div>
-      <span class="meta">${item.location}</span>
-      <span class="tag ${statusClass[item.status]}">${statusLabels[item.status]}</span>
-      <span class="tag">${item.condition}</span>
+      <div class="item-tags">
+        <span class="tag ${statusClass[status]}">${statusLabels[status]}</span>
+        <span class="tag">${esc(item.condition)}</span>
+        ${item.loan_to ? `<button class="button compact" data-return-loan="${esc(item.id)}">${icon("back")} Devuelto</button>` : ""}
+      </div>
       <div class="actions">
-        <button class="button icon-only" title="Editar" data-edit-item="${item.id}">Ed</button>
-        <button class="button icon-only danger" title="Eliminar" data-delete-item="${item.id}">X</button>
+        <button class="button icon-only" aria-label="Editar ${esc(item.name)}" data-edit-item="${esc(item.id)}">${icon("edit")}</button>
+        <button class="button icon-only danger" aria-label="Eliminar ${esc(item.name)}" data-delete-item="${esc(item.id)}">${icon("trash")}</button>
       </div>
     </article>
   `;
@@ -446,105 +485,132 @@ function renderItemRow(item) {
 
 function renderPackagesView() {
   const pkg = getPackage();
+  const sorted = [...openPackages(), ...state.packages.filter((entry) => entry.closed_at)];
   return `
-    ${renderTopbar(
-      "Paquetes",
-      "Prepara el material de una sesion y verifica salida y regreso.",
-      `<button class="button primary" data-open-modal="package">+ Nuevo paquete</button>`,
-    )}
+    ${renderTopbar("Producciones", "", `<button class="button primary" data-open-modal="package">+ Nueva producción</button>`)}
     <section class="package-layout">
       <aside class="card side-panel">
-        <div class="section-header">
-          <div>
-            <h3>Producciones</h3>
-            <p>Selecciona el paquete activo.</p>
-          </div>
-        </div>
-        <div class="list-compact">
+        <div class="list-compact package-list">
           ${
-            state.packages.length
-              ? state.packages
+            sorted.length
+              ? sorted
                   .map(
                     (entry) => `
-                      <button class="compact-row ${entry.id === state.ui.packageId ? "chip is-active" : ""}" data-select-package="${entry.id}">
+                      <button class="compact-row ${entry.id === pkg?.id ? "is-active" : ""}" data-select-package="${esc(entry.id)}">
                         <span>
-                          <strong>${entry.name}</strong>
-                          <div class="small">${entry.date || "Sin fecha"} - ${entry.items.length} elementos</div>
+                          <strong>${esc(entry.name)}</strong>
+                          <div class="small">${entry.date ? formatDate(entry.date) : "Sin fecha"} · ${entry.items.length} equipos</div>
                         </span>
-                        <span>${packageProgress(entry, "regreso")}%</span>
+                        ${entry.closed_at ? `<span class="tag">Finalizada</span>` : `<span class="small">${packageProgress(entry, "salida")}% / ${packageProgress(entry, "regreso")}%</span>`}
                       </button>
                     `,
                   )
                   .join("")
-              : `<div class="empty">Aun no hay paquetes.</div>`
+              : `<div class="empty small-empty">Aún no hay producciones.</div>`
           }
         </div>
       </aside>
-      <div>${pkg ? renderPackageDetail(pkg) : `<div class="card empty">Crea un paquete para empezar.</div>`}</div>
+      <div>${pkg ? renderPackageDetail(pkg) : `<div class="card empty">Crea una producción para armar el checklist.</div>`}</div>
     </section>
   `;
 }
 
 function renderPackageDetail(pkg) {
   const mode = state.ui.checklistMode;
+  const closed = Boolean(pkg.closed_at);
+  const items = checklistItems(pkg, mode);
+  const done = items.filter((id) => pkg.checklist[mode][id]).length;
+  const meta = [pkg.client, pkg.date && formatDate(pkg.date)].filter(Boolean).map(esc).join(" · ");
+
   return `
     <section class="card package-card">
       <div class="section-header">
         <div>
-          <h3>${pkg.name}</h3>
-          <p>${pkg.client || "Sin cliente"} - ${pkg.date || "Sin fecha"}</p>
+          <h3>${esc(pkg.name)} ${closed ? `<span class="tag">Finalizada</span>` : ""}</h3>
+          ${meta ? `<p>${meta}</p>` : ""}
+          ${pkg.notes ? `<p>${esc(pkg.notes)}</p>` : ""}
         </div>
         <div class="actions">
-          <button class="button" data-open-modal="package-items">Material</button>
-          <button class="button danger" data-delete-package="${pkg.id}">Eliminar</button>
+          ${closed ? "" : `<button class="button" data-open-modal="package-items">Elegir material</button>`}
+          <button class="button" data-duplicate-package="${esc(pkg.id)}">Duplicar</button>
+          <button class="button icon-only danger" aria-label="Eliminar producción" data-delete-package="${esc(pkg.id)}">${icon("trash")}</button>
         </div>
       </div>
       <div class="split">
-        ${renderProgress("Checklist de salida", packageProgress(pkg, "salida"))}
-        ${renderProgress("Checklist de regreso", packageProgress(pkg, "regreso"))}
+        ${renderProgress("Salida", pkg, "salida")}
+        ${renderProgress("Regreso", pkg, "regreso")}
       </div>
       <div class="section-header section">
-        <div>
-          <h3>Verificacion</h3>
-          <p>${pkg.notes || "Sin notas adicionales."}</p>
-        </div>
         <div class="tabs">
           <button class="tab ${mode === "salida" ? "is-active" : ""}" data-check-mode="salida">Salida</button>
           <button class="tab ${mode === "regreso" ? "is-active" : ""}" data-check-mode="regreso">Regreso</button>
         </div>
+        <span class="small">${done} de ${items.length} marcados</span>
       </div>
       <div class="checklist">
         ${
-          pkg.items.length
-            ? pkg.items
+          items.length
+            ? items
                 .map((id) => {
                   const item = inventoryById(id);
                   if (!item) return "";
+                  const checked = Boolean(pkg.checklist[mode][id]);
                   return `
-                    <label class="check-row">
-                      <input type="checkbox" data-check-item="${item.id}" ${pkg.checklist?.[mode]?.[item.id] ? "checked" : ""} />
+                    <label class="check-row ${checked ? "is-checked" : ""}">
+                      <input type="checkbox" data-check-item="${esc(item.id)}" ${checked ? "checked" : ""} ${closed ? "disabled" : ""} />
                       <span>
-                        <strong>${item.name}</strong>
-                        <div class="small">${categoryById(item.category).label} - ${item.serial} - ${item.location}</div>
+                        <strong>${esc(item.name)}</strong>
+                        <div class="small">${[categoryById(item.category).label, item.serial].filter(Boolean).map(esc).join(" · ")}</div>
                       </span>
-                      <span class="tag ${statusClass[item.status]}">${statusLabels[item.status]}</span>
                     </label>
                   `;
                 })
                 .join("")
-            : `<div class="empty">Agrega material al paquete.</div>`
+            : `<div class="empty small-empty">${
+                mode === "salida" ? "Elige el material que vas a llevar." : "Marca primero el material que salió."
+              }</div>`
         }
       </div>
+      ${closed ? "" : `<button class="button primary finish" data-finish-package="${esc(pkg.id)}">Finalizar producción</button>`}
     </section>
   `;
 }
 
-function renderProgress(label, value) {
+function renderProgress(label, pkg, mode) {
+  const value = packageProgress(pkg, mode);
   return `
     <div>
-      <div class="small">${label}</div>
-      <div class="progress" style="--value: ${value}%"><span></span></div>
+      <div class="small progress-label"><span>${label}</span><span>${value}%</span></div>
+      <div class="progress ${value === 100 ? "is-complete" : ""}" style="--value: ${value}%"><span></span></div>
     </div>
+  `;
+}
+
+function renderBackupView() {
+  return `
+    ${renderTopbar("Respaldo", "Tu inventario se guarda solo en este dispositivo. Exporta un respaldo de vez en cuando y guárdalo en Drive, iCloud o WhatsApp.")}
+    <section class="grid backup-grid">
+      <article class="card pad">
+        <h3>Copia de seguridad</h3>
+        <p class="small">${state.inventory.length} equipos · ${state.packages.length} producciones</p>
+        <p class="small">Último respaldo: ${state.meta.lastBackupAt ? formatDate(state.meta.lastBackupAt) : "nunca"}</p>
+        <p class="small">Almacenamiento protegido: ${state.persisted ? "sí" : "no garantizado (instala la app para protegerlo)"}</p>
+        <div class="actions start">
+          <button class="button primary" data-export>${icon("backup")} Exportar respaldo</button>
+          <label class="button">
+            Importar respaldo
+            <input type="file" accept="application/json,.json" data-import hidden />
+          </label>
+        </div>
+      </article>
+      <article class="card pad">
+        <h3>Instalar en el teléfono</h3>
+        <p class="small"><strong>Android (Chrome):</strong> menú ⋮ → "Instalar app" o "Agregar a pantalla principal".</p>
+        <p class="small"><strong>iPhone (Safari):</strong> botón Compartir → "Agregar a inicio".</p>
+        <p class="small">Una vez instalada funciona sin internet.</p>
+        ${installPrompt ? `<button class="button primary" data-install>Instalar ahora</button>` : ""}
+      </article>
+    </section>
   `;
 }
 
@@ -555,447 +621,508 @@ function renderModal() {
   return "";
 }
 
-function renderItemModal(item) {
-  const isEdit = Boolean(item);
+function renderModalFrame(title, subtitle, body, formAttrs) {
   return `
     <div class="modal-backdrop" data-close-modal>
-      <form class="modal card" data-item-form data-id="${item?.id || ""}">
+      <form class="modal card" ${formAttrs}>
         <div class="modal-header">
           <div>
-            <h3>${isEdit ? "Editar material" : "Nuevo material"}</h3>
-            <p class="small">Registra la información necesaria para ubicar y preparar el equipo.</p>
+            <h3>${title}</h3>
+            ${subtitle ? `<p class="small">${subtitle}</p>` : ""}
           </div>
-          <button class="button icon-only" type="button" data-close-modal>X</button>
+          <button class="button icon-only" type="button" aria-label="Cerrar" data-close-modal>✕</button>
         </div>
-        <div class="form-stack">
-          <div class="split">
-            <div class="field">
-              <label>Nombre</label>
-              <input name="name" required value="${escapeAttr(item?.name || "")}" />
-            </div>
-            <div class="field">
-              <label>Categoria</label>
-              <select name="category" required>
-                ${categories.map((category) => `<option value="${category.id}" ${item?.category === category.id ? "selected" : ""}>${category.label}</option>`).join("")}
-              </select>
-            </div>
-          </div>
-          <div class="split">
-            <div class="field">
-              <label>Serial / placa</label>
-              <input name="serial" required value="${escapeAttr(item?.serial || "")}" />
-            </div>
-            <div class="field">
-              <label>Ubicacion fisica</label>
-              <input name="location" required placeholder="Ej. Bodega A / Estante 2" value="${escapeAttr(item?.location || "")}" />
-            </div>
-          </div>
-          <div class="split">
-            <div class="field">
-              <label>Estado</label>
-              <select name="status">
-                ${Object.entries(statusLabels).map(([value, label]) => `<option value="${value}" ${item?.status === value ? "selected" : ""}>${label}</option>`).join("")}
-              </select>
-            </div>
-            <div class="field">
-              <label>Condicion</label>
-              <select name="condition">
-                ${["Excelente", "Muy bueno", "Bueno", "Revision"].map((value) => `<option ${item?.condition === value ? "selected" : ""}>${value}</option>`).join("")}
-              </select>
-            </div>
-          </div>
-          <div class="field">
-            <label>Notas</label>
-            <textarea name="notes">${escapeHtml(item?.notes || "")}</textarea>
-          </div>
-          <button class="button primary" type="submit">${isEdit ? "Guardar cambios" : "Crear material"}</button>
-        </div>
+        ${body}
       </form>
     </div>
   `;
 }
 
-function renderPackageModal() {
-  return `
-    <div class="modal-backdrop" data-close-modal>
-      <form class="modal card" data-package-form>
-        <div class="modal-header">
-          <div>
-            <h3>Nuevo paquete</h3>
-            <p class="small">Crea una producción y luego asigna material.</p>
-          </div>
-          <button class="button icon-only" type="button" data-close-modal>X</button>
-        </div>
-        <div class="form-stack">
+function renderItemModal(item) {
+  const isEdit = Boolean(item);
+  const category = item?.category || modal.category;
+  const options = (values, current) =>
+    values.map(([value, label]) => `<option value="${value}" ${current === value ? "selected" : ""}>${label}</option>`).join("");
+
+  return renderModalFrame(
+    isEdit ? "Editar material" : "Nuevo material",
+    "Solo el nombre es obligatorio.",
+    `
+      <div class="form-stack">
+        <div class="split">
           <div class="field">
-            <label>Nombre de la sesion</label>
-            <input name="name" required placeholder="Ej. Boda campestre" />
+            <label for="f-name">Nombre</label>
+            <input id="f-name" name="name" required maxlength="120" placeholder="Ej. Sony A7 III" value="${esc(item?.name || "")}" />
           </div>
+          <div class="field">
+            <label for="f-category">Categoría</label>
+            <select id="f-category" name="category">${options(categories.map((c) => [c.id, c.label]), category)}</select>
+          </div>
+        </div>
+        <div class="split">
+          <div class="field">
+            <label for="f-serial">Serial / placa</label>
+            <input id="f-serial" name="serial" maxlength="80" value="${esc(item?.serial || "")}" />
+          </div>
+          <div class="field">
+            <label for="f-location">Ubicación</label>
+            <input id="f-location" name="location" maxlength="120" placeholder="Ej. Maleta 1" value="${esc(item?.location || "")}" />
+          </div>
+        </div>
+        <div class="split">
+          <div class="field">
+            <label for="f-status">Estado</label>
+            <select id="f-status" name="status">${options(manualStatuses.map((s) => [s, statusLabels[s]]), item?.status)}</select>
+          </div>
+          <div class="field">
+            <label for="f-condition">Condición</label>
+            <select id="f-condition" name="condition">${options(conditions.map((c) => [c, c]), item?.condition || "Bueno")}</select>
+          </div>
+        </div>
+        <fieldset class="loan-fields">
+          <legend>Préstamo</legend>
           <div class="split">
             <div class="field">
-              <label>Cliente</label>
-              <input name="client" placeholder="Cliente o proyecto" />
+              <label for="f-loan-to">Prestado a</label>
+              <input id="f-loan-to" name="loan_to" maxlength="120" placeholder="Vacío si lo tienes tú" value="${esc(item?.loan_to || "")}" />
             </div>
             <div class="field">
-              <label>Fecha</label>
-              <input name="date" type="date" />
+              <label for="f-loan-since">Desde</label>
+              <input id="f-loan-since" name="loan_since" type="date" value="${esc(item?.loan_since || "")}" />
             </div>
           </div>
-          <div class="field">
-            <label>Notas</label>
-            <textarea name="notes" placeholder="Necesidades especiales, responsable, lugar..."></textarea>
-          </div>
-          <button class="button primary" type="submit">Crear paquete</button>
+        </fieldset>
+        <div class="field">
+          <label for="f-notes">Notas</label>
+          <textarea id="f-notes" name="notes" maxlength="2000">${esc(item?.notes || "")}</textarea>
         </div>
-      </form>
-    </div>
-  `;
+        <div class="actions">
+          <button class="button primary" type="submit">${isEdit ? "Guardar cambios" : "Guardar"}</button>
+          ${isEdit ? "" : `<button class="button" type="submit" value="again">Guardar y agregar otro</button>`}
+        </div>
+      </div>
+    `,
+    `data-item-form data-id="${esc(item?.id || "")}"`,
+  );
+}
+
+function renderPackageModal() {
+  return renderModalFrame(
+    "Nueva producción",
+    "Luego eliges el material que vas a llevar.",
+    `
+      <div class="form-stack">
+        <div class="field">
+          <label for="p-name">Nombre</label>
+          <input id="p-name" name="name" required maxlength="120" placeholder="Ej. Boda campestre" />
+        </div>
+        <div class="split">
+          <div class="field">
+            <label for="p-client">Cliente</label>
+            <input id="p-client" name="client" maxlength="120" />
+          </div>
+          <div class="field">
+            <label for="p-date">Fecha</label>
+            <input id="p-date" name="date" type="date" />
+          </div>
+        </div>
+        <div class="field">
+          <label for="p-notes">Notas</label>
+          <textarea id="p-notes" name="notes" maxlength="2000" placeholder="Lugar, responsable, necesidades especiales..."></textarea>
+        </div>
+        <button class="button primary" type="submit">Crear y elegir material</button>
+      </div>
+    `,
+    "data-package-form",
+  );
 }
 
 function renderPackageItemsModal() {
   const pkg = getPackage();
   if (!pkg) return "";
   const selected = new Set(pkg.items);
-  const usableInventory = state.inventory.filter((item) => item.status !== "perdido");
 
-  return `
-    <div class="modal-backdrop" data-close-modal>
-      <form class="modal card" data-package-items-form>
-        <div class="modal-header">
-          <div>
-            <h3>Material del paquete</h3>
-            <p class="small">${pkg.name}</p>
-          </div>
-          <button class="button icon-only" type="button" data-close-modal>X</button>
-        </div>
-        <div class="selector-list">
-          ${
-            usableInventory.length
-              ? usableInventory
-                  .map(
-                    (item) => `
-                      <label class="selectable">
-                        <input type="checkbox" name="items" value="${item.id}" ${selected.has(item.id) ? "checked" : ""} />
-                        <span>
-                          <strong>${item.name}</strong>
-                          <div class="small">${categoryById(item.category).label} - ${item.serial} - ${item.location}</div>
-                        </span>
-                        <span class="tag ${statusClass[item.status]}">${statusLabels[item.status]}</span>
-                      </label>
-                    `,
-                  )
-                  .join("")
-              : `<div class="empty">Agrega material al inventario primero.</div>`
-          }
-        </div>
-        <div class="modal-actions">
-          <button class="button primary" type="submit">Guardar material</button>
-        </div>
-      </form>
-    </div>
-  `;
+  return renderModalFrame(
+    "Material de la producción",
+    esc(pkg.name),
+    `
+      <input type="search" class="pick-search" data-pick-search placeholder="Filtrar material" />
+      <div class="selector-list">
+        ${
+          state.inventory.length
+            ? state.inventory
+                .map((item) => {
+                  const status = displayStatus(item);
+                  const blocked = !selected.has(item.id) && !["disponible", "paquete"].includes(status);
+                  return `
+                    <label class="selectable ${blocked ? "is-blocked" : ""}" data-pick-text="${esc(`${item.name} ${item.serial} ${categoryById(item.category).label}`.toLowerCase())}">
+                      <input type="checkbox" name="items" value="${esc(item.id)}" ${selected.has(item.id) ? "checked" : ""} ${blocked ? "disabled" : ""} />
+                      <span>
+                        <strong>${esc(item.name)}</strong>
+                        <div class="small">${[categoryById(item.category).label, item.serial].filter(Boolean).map(esc).join(" · ")}</div>
+                      </span>
+                      <span class="tag ${statusClass[status]}">${statusLabels[status]}</span>
+                    </label>
+                  `;
+                })
+                .join("")
+            : `<div class="empty small-empty">Agrega material al inventario primero.</div>`
+        }
+      </div>
+      <div class="modal-actions">
+        <button class="button primary" type="submit">Guardar material</button>
+      </div>
+    `,
+    "data-package-items-form",
+  );
 }
 
-function bindEvents() {
-  document.querySelector("[data-auth-form]")?.addEventListener("submit", submitAuth);
-  document.querySelector("[data-toggle-auth]")?.addEventListener("click", () => {
-    state.ui.authMode = state.ui.authMode === "login" ? "register" : "login";
-    state.ui.error = "";
-    render();
-  });
+// ---------- Events (delegated once, so re-rendering never loses listeners) ----------
 
-  document.querySelectorAll("[data-view]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.ui.view = button.dataset.view;
-      render();
-    });
-  });
+const clickActions = [
+  ["data-view", (el) => setView(el.dataset.view)],
+  ["data-reload", () => location.reload()],
+  ["data-open-modal", (el) => openModal({ type: el.dataset.openModal, category: state.ui.category })],
+  ["data-category", (el) => ((state.ui.category = el.dataset.category), render())],
+  ["data-category-jump", (el) => ((state.ui.category = el.dataset.categoryJump), (state.ui.statusFilter = "todos"), setView("inventory"))],
+  ["data-status-jump", (el) => ((state.ui.statusFilter = el.dataset.statusJump), (state.ui.category = "todos"), setView("inventory"))],
+  ["data-edit-item", (el) => openModal({ type: "item", itemId: el.dataset.editItem })],
+  ["data-delete-item", (el) => deleteInventoryItem(el.dataset.deleteItem)],
+  ["data-return-loan", (el) => returnLoan(el.dataset.returnLoan)],
+  ["data-select-package", (el) => ((state.ui.packageId = el.dataset.selectPackage), setView("packages"))],
+  ["data-check-mode", (el) => ((state.ui.checklistMode = el.dataset.checkMode), render())],
+  ["data-duplicate-package", (el) => duplicatePackage(el.dataset.duplicatePackage)],
+  ["data-delete-package", (el) => deletePackage(el.dataset.deletePackage)],
+  ["data-finish-package", (el) => finishPackage(el.dataset.finishPackage)],
+  ["data-export", () => exportBackup()],
+  ["data-install", () => installPrompt?.prompt()],
+  // Last: the backdrop wraps every modal button, so it must not shadow them.
+  ["data-close-modal", (el, event) => (event.target === el || el.tagName === "BUTTON") && closeModal()],
+];
 
-  document.querySelector("[data-logout]")?.addEventListener("click", logout);
-  document.querySelectorAll("[data-refresh]").forEach((button) => {
-    button.addEventListener("click", refreshData);
-  });
-
-  document.querySelectorAll("[data-open-modal]").forEach((button) => {
-    button.addEventListener("click", () => {
-      modal = { type: button.dataset.openModal };
-      render();
-    });
-  });
-
-  document.querySelectorAll("[data-close-modal]").forEach((node) => {
-    node.addEventListener("click", (event) => {
-      if (event.target === node || event.target.dataset.closeModal !== undefined) {
-        modal = null;
-        render();
-      }
-    });
-  });
-
-  document.querySelectorAll("[data-category]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.ui.category = button.dataset.category;
-      render();
-    });
-  });
-
-  document.querySelectorAll("[data-category-jump]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.ui.category = button.dataset.categoryJump;
-      state.ui.view = "inventory";
-      render();
-    });
-  });
-
-  document.querySelector("[data-search]")?.addEventListener("input", (event) => {
-    state.ui.search = event.target.value;
-    render();
-  });
-  document.querySelector("[data-status-filter]")?.addEventListener("input", (event) => {
-    state.ui.statusFilter = event.target.value;
-    render();
-  });
-  document.querySelector("[data-condition-filter]")?.addEventListener("input", (event) => {
-    state.ui.conditionFilter = event.target.value;
-    render();
-  });
-
-  document.querySelectorAll("[data-edit-item]").forEach((button) => {
-    button.addEventListener("click", () => {
-      modal = { type: "item", itemId: button.dataset.editItem };
-      render();
-    });
-  });
-
-  document.querySelectorAll("[data-delete-item]").forEach((button) => {
-    button.addEventListener("click", () => deleteInventoryItem(button.dataset.deleteItem));
-  });
-
-  document.querySelector("[data-item-form]")?.addEventListener("submit", saveItemFromForm);
-  document.querySelector("[data-package-form]")?.addEventListener("submit", savePackageFromForm);
-  document.querySelector("[data-package-items-form]")?.addEventListener("submit", savePackageItemsFromForm);
-
-  document.querySelectorAll("[data-select-package]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.ui.packageId = button.dataset.selectPackage;
-      render();
-    });
-  });
-
-  document.querySelectorAll("[data-check-mode]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.ui.checklistMode = button.dataset.checkMode;
-      render();
-    });
-  });
-
-  document.querySelectorAll("[data-check-item]").forEach((checkbox) => {
-    checkbox.addEventListener("change", () =>
-      updateCheck(checkbox.dataset.checkItem, checkbox.checked),
-    );
-  });
-
-  document.querySelectorAll("[data-delete-package]").forEach((button) => {
-    button.addEventListener("click", () => deletePackage(button.dataset.deletePackage));
-  });
-}
-
-async function submitAuth(event) {
-  event.preventDefault();
-  state.ui.error = "";
-  const form = Object.fromEntries(new FormData(event.currentTarget));
-  const endpoint = state.ui.authMode === "register" ? "/auth/register" : "/auth/login";
-
-  try {
-    const data = await api(endpoint, {
-      method: "POST",
-      body: {
-        cedula: String(form.cedula).trim(),
-        password: String(form.password),
-        name: String(form.name || "").trim(),
-      },
-    });
-    localStorage.setItem(TOKEN_KEY, data.token);
-    session = loadSession();
-    state.ui.view = "dashboard";
-    await refreshData();
-    showToast(state.ui.authMode === "register" ? "Cuenta creada." : "Sesion iniciada.");
-  } catch (error) {
-    state.ui.error = error.message;
-    render();
+document.addEventListener("click", (event) => {
+  for (const [attr, action] of clickActions) {
+    const el = event.target.closest(`[${attr}]`);
+    if (el) return action(el, event);
   }
+});
+
+document.addEventListener("input", (event) => {
+  const el = event.target;
+  if (el.matches("[data-search]")) {
+    state.ui.search = el.value;
+    refreshRows();
+  }
+  if (el.matches("[data-pick-search]")) {
+    const query = el.value.trim().toLowerCase();
+    document.querySelectorAll("[data-pick-text]").forEach((row) => {
+      row.hidden = !row.dataset.pickText.includes(query);
+    });
+  }
+});
+
+document.addEventListener("change", (event) => {
+  const el = event.target;
+  if (el.matches("[data-status-filter]")) (state.ui.statusFilter = el.value), refreshRows();
+  if (el.matches("[data-condition-filter]")) (state.ui.conditionFilter = el.value), refreshRows();
+  if (el.matches("[data-check-item]")) updateCheck(el.dataset.checkItem, el.checked);
+  if (el.matches("[data-import]")) importBackup(el);
+});
+
+document.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const form = event.target;
+  if (form.matches("[data-item-form]")) saveItemFromForm(form, event.submitter?.value === "again");
+  if (form.matches("[data-package-form]")) savePackageFromForm(form);
+  if (form.matches("[data-package-items-form]")) savePackageItemsFromForm(form);
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && modal) closeModal();
+});
+
+function refreshRows() {
+  const list = document.querySelector("[data-rows]");
+  if (list) list.innerHTML = renderInventoryRows();
 }
 
-function logout() {
-  localStorage.removeItem(TOKEN_KEY);
-  session = null;
-  state.inventory = [];
-  state.packages = [];
+function setView(view) {
+  state.ui.view = view;
+  modal = null;
+  render();
+  window.scrollTo(0, 0);
+}
+
+function openModal(next) {
+  modal = next;
+  render();
+  document.querySelector(".modal input:not([type=checkbox])")?.focus();
+}
+
+function closeModal() {
+  modal = null;
   render();
 }
 
-async function saveItemFromForm(event) {
-  event.preventDefault();
-  const form = event.currentTarget;
+// ---------- Actions ----------
+
+async function saveItemFromForm(form, again) {
   const data = Object.fromEntries(new FormData(form));
+  const id = form.dataset.id;
   const payload = {
     name: data.name.trim(),
     category: data.category,
     serial: data.serial.trim(),
     location: data.location.trim(),
-    status: data.status,
+    status: manualStatuses.includes(data.status) ? data.status : "disponible",
     condition: data.condition,
     notes: data.notes.trim(),
+    loan_to: data.loan_to.trim(),
+    loan_since: data.loan_to.trim() ? data.loan_since || today() : "",
+    updated_at: new Date().toISOString(),
   };
 
-  try {
-    const result = await api(form.dataset.id ? `/inventory/${form.dataset.id}` : "/inventory", {
-      method: form.dataset.id ? "PUT" : "POST",
-      body: payload,
-    });
+  if (!payload.name) return showToast("El nombre es obligatorio.", "danger");
+  const serial = payload.serial.toLowerCase();
+  const duplicate = serial && state.inventory.find((item) => item.id !== id && item.serial.toLowerCase() === serial);
+  if (duplicate) return showToast(`El serial ${payload.serial} ya está registrado en "${duplicate.name}".`, "danger");
 
-    if (form.dataset.id) {
-      state.inventory = state.inventory.map((item) => (item.id === result.item.id ? result.item : item));
-    } else {
-      state.inventory.unshift(result.item);
-    }
-    modal = null;
-    render();
-    showToast(form.dataset.id ? "Material actualizado." : "Material creado.");
-  } catch (error) {
-    showToast(error.message);
+  if (id) {
+    state.inventory = state.inventory.map((item) => (item.id === id ? { ...item, ...payload } : item));
+  } else {
+    state.inventory.unshift({ id: uid(), created_at: payload.updated_at, ...payload });
+  }
+  modal = again ? { type: "item", category: payload.category } : null;
+  if (await commit(id ? "Material actualizado." : `"${payload.name}" guardado.`)) {
+    if (again) document.querySelector("#f-name")?.focus();
   }
 }
 
 async function deleteInventoryItem(id) {
-  try {
-    await api(`/inventory/${id}`, { method: "DELETE" });
-    state.inventory = state.inventory.filter((item) => item.id !== id);
-    state.packages = state.packages.map((pkg) => ({
-      ...pkg,
-      items: pkg.items.filter((itemId) => itemId !== id),
-    }));
-    render();
-    showToast("Material eliminado.");
-  } catch (error) {
-    showToast(error.message);
-  }
+  const item = inventoryById(id);
+  if (!item) return;
+  const inUse = openPackages().filter((pkg) => pkg.items.includes(id));
+  const warning = inUse.length ? `\n\nEstá en: ${inUse.map((pkg) => pkg.name).join(", ")}.` : "";
+  if (!confirm(`¿Eliminar "${item.name}"? Esta acción no se puede deshacer.${warning}`)) return;
+
+  state.inventory = state.inventory.filter((entry) => entry.id !== id);
+  state.packages.forEach((pkg) => {
+    pkg.items = pkg.items.filter((itemId) => itemId !== id);
+    delete pkg.checklist.salida[id];
+    delete pkg.checklist.regreso[id];
+  });
+  await commit("Material eliminado.");
 }
 
-async function savePackageFromForm(event) {
-  event.preventDefault();
-  const data = Object.fromEntries(new FormData(event.currentTarget));
-  try {
-    const result = await api("/packages", {
-      method: "POST",
-      body: {
-        name: data.name.trim(),
-        client: data.client.trim(),
-        date: data.date,
-        notes: data.notes.trim(),
-      },
-    });
-    state.packages.unshift(normalizePackages([result.package])[0]);
-    state.ui.packageId = result.package.id;
-    state.ui.view = "packages";
-    modal = { type: "package-items" };
-    render();
-    showToast("Paquete creado.");
-  } catch (error) {
-    showToast(error.message);
-  }
+async function returnLoan(id) {
+  const item = inventoryById(id);
+  if (!item) return;
+  Object.assign(item, { loan_to: "", loan_since: "", updated_at: new Date().toISOString() });
+  await commit(`"${item.name}" marcado como devuelto.`);
 }
 
-async function savePackageItemsFromForm(event) {
-  event.preventDefault();
+async function savePackageFromForm(form) {
+  const data = Object.fromEntries(new FormData(form));
+  if (!data.name.trim()) return showToast("El nombre es obligatorio.", "danger");
+  const pkg = {
+    id: uid(),
+    name: data.name.trim(),
+    client: data.client.trim(),
+    date: data.date,
+    notes: data.notes.trim(),
+    items: [],
+    checklist: { salida: {}, regreso: {} },
+    closed_at: null,
+    created_at: new Date().toISOString(),
+  };
+  state.packages.unshift(pkg);
+  state.ui.packageId = pkg.id;
+  state.ui.view = "packages";
+  state.ui.checklistMode = "salida";
+  modal = { type: "package-items" };
+  await commit("Producción creada.");
+}
+
+async function savePackageItemsFromForm(form) {
   const pkg = getPackage();
   if (!pkg) return;
-  const items = new FormData(event.currentTarget).getAll("items");
-
-  try {
-    await api(`/packages/${pkg.id}/items`, {
-      method: "PUT",
-      body: { items },
-    });
-    modal = null;
-    await refreshData();
-    showToast("Material del paquete actualizado.");
-  } catch (error) {
-    showToast(error.message);
-  }
+  const items = new FormData(form).getAll("items").filter((id) => inventoryById(id));
+  const keep = (checks) => Object.fromEntries(Object.entries(checks).filter(([id]) => items.includes(id)));
+  pkg.items = items;
+  pkg.checklist = { salida: keep(pkg.checklist.salida), regreso: keep(pkg.checklist.regreso) };
+  modal = null;
+  await commit("Material actualizado.");
 }
 
 async function updateCheck(itemId, checked) {
   const pkg = getPackage();
-  if (!pkg) return;
+  if (!pkg || pkg.closed_at) return;
   const mode = state.ui.checklistMode;
-  pkg.checklist[mode][itemId] = checked;
-  render();
+  if (checked) pkg.checklist[mode][itemId] = true;
+  else delete pkg.checklist[mode][itemId];
+  // Unchecking salida means it never left, so it can't be pending on regreso.
+  if (mode === "salida" && !checked) delete pkg.checklist.regreso[itemId];
+  await commit();
+}
 
-  try {
-    await api(`/packages/${pkg.id}/checks`, {
-      method: "PATCH",
-      body: { itemId, mode, checked },
-    });
-  } catch (error) {
-    pkg.checklist[mode][itemId] = !checked;
-    render();
-    showToast(error.message);
-  }
+async function finishPackage(id) {
+  const pkg = state.packages.find((entry) => entry.id === id);
+  if (!pkg) return;
+  const missing = checklistItems(pkg, "regreso").filter((itemId) => !pkg.checklist.regreso[itemId]);
+  const names = missing.map((itemId) => inventoryById(itemId)?.name).filter(Boolean);
+  const message = names.length
+    ? `Faltan por regresar ${names.length} equipos:\n\n- ${names.join("\n- ")}\n\nQuedarán marcados como "Extraviado" para que los busques. ¿Finalizar?`
+    : "¿Finalizar la producción? El material quedará disponible otra vez.";
+  if (!confirm(message)) return;
+
+  const now = new Date().toISOString();
+  missing.forEach((itemId) => {
+    const item = inventoryById(itemId);
+    if (item) Object.assign(item, { status: "perdido", updated_at: now });
+  });
+  pkg.closed_at = now;
+  await commit(names.length ? `Producción finalizada. ${names.length} equipos por revisar.` : "Producción finalizada. Todo regresó.");
+}
+
+async function duplicatePackage(id) {
+  const source = state.packages.find((entry) => entry.id === id);
+  if (!source) return;
+  const copy = {
+    ...source,
+    id: uid(),
+    name: `${source.name} (copia)`,
+    date: "",
+    items: source.items.filter((itemId) => inventoryById(itemId)),
+    checklist: { salida: {}, regreso: {} },
+    closed_at: null,
+    created_at: new Date().toISOString(),
+  };
+  state.packages.unshift(copy);
+  state.ui.packageId = copy.id;
+  state.ui.checklistMode = "salida";
+  await commit("Producción duplicada con el mismo material.");
 }
 
 async function deletePackage(id) {
-  try {
-    await api(`/packages/${id}`, { method: "DELETE" });
-    state.packages = state.packages.filter((pkg) => pkg.id !== id);
-    state.ui.packageId = state.packages[0]?.id || null;
-    render();
-    showToast("Paquete eliminado.");
-  } catch (error) {
-    showToast(error.message);
-  }
+  const pkg = state.packages.find((entry) => entry.id === id);
+  if (!pkg || !confirm(`¿Eliminar la producción "${pkg.name}"? El material no se borra.`)) return;
+  state.packages = state.packages.filter((entry) => entry.id !== id);
+  state.ui.packageId = null;
+  await commit("Producción eliminada.");
 }
 
-function getPackage() {
-  return (
-    state.packages.find((pkg) => pkg.id === state.ui.packageId) ||
-    state.packages[0] ||
-    null
+async function exportBackup() {
+  const stamp = today();
+  const json = JSON.stringify(
+    { app: "fotostock", version: 1, exportedAt: new Date().toISOString(), inventory: state.inventory, packages: state.packages },
+    null,
+    2,
   );
+  const file = new File([json], `fotostock-respaldo-${stamp}.json`, { type: "application/json" });
+
+  let shared = false;
+  // On phones the share sheet lets the user drop the file straight into Drive/iCloud/WhatsApp.
+  if (matchMedia("(pointer: coarse)").matches && navigator.canShare?.({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: "Respaldo FotoStock" });
+      shared = true;
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+    }
+  }
+
+  try {
+    if (!shared) {
+      const url = URL.createObjectURL(file);
+      const link = Object.assign(document.createElement("a"), { href: url, download: file.name });
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+  } catch (error) {
+    if (error?.name !== "AbortError") showToast(`No se pudo exportar: ${error?.message || error}`, "danger");
+    return;
+  }
+
+  state.meta.lastBackupAt = new Date().toISOString();
+  await commit("Respaldo exportado. Guárdalo fuera del teléfono.", { touch: false });
 }
 
-function inventoryById(id) {
-  return state.inventory.find((item) => item.id === id);
+async function importBackup(input) {
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  if (file.size > 10 * 1024 * 1024) return showToast("El archivo es demasiado grande para ser un respaldo.", "danger");
+
+  let raw;
+  try {
+    raw = JSON.parse(await file.text());
+  } catch {
+    return showToast("El archivo no es un JSON válido.", "danger");
+  }
+  if (!raw || typeof raw !== "object" || !Array.isArray(raw.inventory)) {
+    return showToast("Este archivo no es un respaldo de FotoStock.", "danger");
+  }
+
+  const data = normalizeData({ ...raw, meta: state.meta });
+  const skipped = raw.inventory.length - data.inventory.length;
+  const summary = `El respaldo tiene ${data.inventory.length} equipos y ${data.packages.length} producciones${
+    skipped ? ` (${skipped} registros inválidos se omitirán)` : ""
+  }.`;
+  const current = state.inventory.length ? `\n\nEsto REEMPLAZA los ${state.inventory.length} equipos actuales.` : "";
+  if (!confirm(`${summary}${current}\n\n¿Importar?`)) return;
+
+  state.inventory = data.inventory;
+  state.packages = data.packages;
+  state.ui.packageId = null;
+  await commit("Respaldo importado.");
 }
 
-function categoryById(id) {
-  return categories.find((category) => category.id === id) || categories[0];
-}
+// ---------- Helpers ----------
 
-function packageProgress(pkg, mode) {
-  if (!pkg || pkg.items.length === 0) return 0;
-  const checked = pkg.items.filter((id) => pkg.checklist?.[mode]?.[id]).length;
-  return Math.round((checked / pkg.items.length) * 100);
-}
-
-function showToast(message) {
+function showToast(message, type = "") {
   clearTimeout(toastTimer);
   document.querySelector(".toast")?.remove();
   const toast = document.createElement("div");
-  toast.className = "toast";
+  toast.className = `toast ${type}`;
+  toast.setAttribute("role", "status");
   toast.textContent = message;
   document.body.appendChild(toast);
-  toastTimer = setTimeout(() => toast.remove(), 2800);
+  toastTimer = setTimeout(() => toast.remove(), type === "danger" ? 5000 : 2800);
 }
 
-function escapeHtml(value) {
-  return String(value)
+function icon(name) {
+  return `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${icons[name]}</svg>`;
+}
+
+function uid() {
+  return crypto.randomUUID();
+}
+
+function today() {
+  return new Date().toLocaleDateString("en-CA");
+}
+
+function formatDate(value) {
+  const date = new Date(value.length === 10 ? `${value}T00:00` : value);
+  return Number.isNaN(date.getTime())
+    ? value
+    : date.toLocaleDateString("es-CO", { day: "numeric", month: "short", year: "numeric" });
+}
+
+function daysAgo(isoDay) {
+  const days = Math.floor((Date.now() - Date.parse(`${isoDay}T00:00`)) / 864e5);
+  if (days <= 0) return "desde hoy";
+  if (days === 1) return "desde ayer";
+  return `hace ${days} días`;
+}
+
+function esc(value) {
+  return String(value ?? "")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
-}
-
-function escapeAttr(value) {
-  return escapeHtml(value).replaceAll("'", "&#039;");
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
